@@ -828,6 +828,7 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) void {
     var off: usize = 0;
     while (off < bytes.len) {
         const n = std.c.write(fd, bytes[off..].ptr, bytes.len - off);
+        if (n < 0 and std.posix.errno(n) == .INTR) continue; // a signal (e.g. resize) interrupted the write
         if (n <= 0) return; // best-effort: a vanished tty has nothing to draw
         off += @intCast(n);
     }
@@ -2778,4 +2779,15 @@ test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {
     try std.testing.expectEqual(@as(?Refusal, .no_color), refusalReason(true, true, true, false));
     try std.testing.expectEqual(@as(?Refusal, .ci), refusalReason(true, true, false, true));
     try std.testing.expect(refusalReason(true, true, false, false) == null);
+}
+
+test "writeAll delivers the whole frame when a resize interrupts a blocked write" {
+    var fx = try @import("../testing/resize_interrupt.zig").Fixture.init();
+    defer fx.deinit();
+    try fx.start();
+
+    const frame = "0123456789";
+    writeAll(fx.writeFd(), frame);
+    // Pre-fill plus the whole frame came out: nothing was dropped.
+    try std.testing.expectEqual(fx.filled + frame.len, fx.finish());
 }
