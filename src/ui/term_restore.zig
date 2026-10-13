@@ -1,8 +1,8 @@
 //! malt — signal-safe crash-restore registry for terminal state.
 //!
-//! `std`-only leaf in the `ui/` sink layer, below both the CLI progress
-//! engine and `tui/term.zig`. The TUI's saved termios lives on the run
-//! loop's stack, unreachable from the process-global panic hook and from
+//! `std`-only leaf (tests use `testing/resize_interrupt.zig`) in the `ui/`
+//! sink layer, below both the CLI progress engine and `tui/term.zig`. The
+//! TUI's saved termios lives on the run loop's stack, unreachable from the process-global panic hook and from
 //! signal handlers; this registry mirrors the two fields the crash path
 //! needs — the terminal fd and the pre-raw termios — so either path can
 //! put the terminal back before the process dies.
@@ -43,6 +43,7 @@ pub fn crashRestore() void {
     var off: usize = 0;
     while (off < restore_seq.len) {
         const n = std.c.write(reg_fd, restore_seq[off..].ptr, restore_seq.len - off);
+        if (n < 0 and std.posix.errno(n) == .INTR) continue; // a signal (e.g. resize) interrupted the write
         if (n <= 0) break; // best-effort: a vanished tty has nothing to restore
         off += @intCast(n);
     }
@@ -189,4 +190,15 @@ test "crashRestore after register/clear round-trip writes nothing" {
     const n = std.c.read(fds[0], &buf, buf.len);
     try std.testing.expectEqual(@as(isize, 1), n);
     try std.testing.expectEqual(@as(u8, 'S'), buf[0]);
+}
+
+test "crashRestore delivers the whole sequence when a signal interrupts a blocked write" {
+    var fx = try @import("../testing/resize_interrupt.zig").Fixture.init();
+    defer fx.deinit();
+    try fx.start();
+
+    register(fx.writeFd(), std.mem.zeroes(std.posix.termios));
+    defer clear();
+    crashRestore();
+    try std.testing.expectEqual(fx.filled + restore_seq.len, fx.finish());
 }

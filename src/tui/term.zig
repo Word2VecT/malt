@@ -78,6 +78,7 @@ pub const Term = struct {
         var off: usize = 0;
         while (off < bytes.len) {
             const n = std.c.write(self.fd, bytes[off..].ptr, bytes.len - off);
+            if (n < 0 and std.posix.errno(n) == .INTR) continue; // a signal (e.g. resize) interrupted the write
             if (n <= 0) return TermError.WriteFailed;
             off += @intCast(n);
         }
@@ -268,4 +269,23 @@ test "restore emits mouse_disable before alt_leave" {
         got += @intCast(n);
     }
     try std.testing.expectEqualStrings(want, &buf);
+}
+
+test "enterAltScreen survives a resize signal interrupting a blocked write" {
+    var fx = try @import("../testing/resize_interrupt.zig").Fixture.init();
+    defer fx.deinit();
+    try fx.start();
+
+    var t = termOnPipe(fx.writeFd());
+    try t.enterAltScreen();
+    try std.testing.expect(t.in_alt);
+    try std.testing.expectEqual(fx.filled + seq.alt_enter.len, fx.finish());
+}
+
+test "enterAltScreen still fails on a dead fd and leaves in_alt unset" {
+    // Only EINTR is retried; a real tty fault must stay fatal (a retry on any
+    // n < 0 would spin here instead of failing).
+    var t = termOnPipe(-1);
+    try std.testing.expectError(TermError.WriteFailed, t.enterAltScreen());
+    try std.testing.expect(!t.in_alt);
 }
