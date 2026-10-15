@@ -232,6 +232,7 @@ fn listContentRect(s: *const State, rect: tab.Rect) tab.Rect {
 /// bottom, the filtered + scrolled list in between. A pure function of
 /// `(state, rect)` so a resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
+    if (r.height == 0) return;
     var content = r;
     if (s.confirm_uninstall) |*target| {
         renderGuard(target.name(), f, .{ .row = content.row, .col = content.col, .width = content.width, .height = 1 });
@@ -285,14 +286,28 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     }
 }
 
+comptime {
+    std.debug.assert(row_buf_len + "Uninstall ? [y/N]".len <= tab.modal_prompt_buf_len);
+}
+
+fn guardText(buf: []u8, name: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
+}
+
+/// The uninstall prompt while the guard is armed. The shell shows it outside the
+/// tab when the body has no rows to draw the banner in.
+pub fn modalPrompt(s: *const State, buf: []u8) ?[]const u8 {
+    const target = if (s.confirm_uninstall) |*t| t else return null;
+    return guardText(buf, target.name());
+}
+
 /// The banner names the latched target, never the live selection — what it
 /// shows is exactly what `y` will uninstall.
 fn renderGuard(name: []const u8, f: *tab.Frame, rect: tab.Rect) void {
     f.moveTo(rect.row, rect.col);
     f.put(color.Style.reverse.code());
     var b: [row_buf_len]u8 = undefined;
-    const line = std.fmt.bufPrint(&b, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
-    f.putContent(scroll_list.truncate(line, rect.width));
+    f.putContent(scroll_list.truncate(guardText(&b, name), rect.width));
     f.put(color.Style.reset.code());
 }
 
@@ -828,6 +843,43 @@ test "render draws the [y/N] guard banner naming the package when confirming" {
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "curl") != null);
     try testing.expect(std.mem.indexOf(u8, out, "[y/N]") != null);
+}
+
+test "render on a zero-height rect paints nothing, even with the guard armed" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.chrome.view.selected = 1; // curl
+    _ = stepKey(&s, ch('x'));
+    render(&s, &f, .{ .row = 7, .col = 1, .width = 80, .height = 0 });
+    try testing.expectEqual(@as(usize, 0), f.slice().len);
+}
+
+test "render on a zero-height rect paints nothing without the guard too" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 7, .col = 1, .width = 80, .height = 0 });
+    try testing.expectEqual(@as(usize, 0), f.slice().len);
+}
+
+test "hitTest on a zero-height rect hits nothing, even with the guard armed" {
+    var s: State = .{ .items = &sample };
+    s.chrome.view.selected = 1; // curl
+    _ = stepKey(&s, ch('x'));
+    const rect: tab.Rect = .{ .row = 7, .col = 1, .width = 80, .height = 0 };
+    try testing.expect(hitTest(&s, rect, 7, 1) == null);
+    try testing.expect(hitTest(&s, rect, 8, 1) == null);
+}
+
+test "render on a one-row rect still paints the armed guard banner" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.chrome.view.selected = 1; // curl
+    _ = stepKey(&s, ch('x'));
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "[y/N]") != null);
 }
 
 test "render reflows: the same state at two widths differs" {
