@@ -136,6 +136,9 @@ pub fn blankRemainder(f: *Frame, rect: Rect, painted: u16) void {
 /// dead arm, and `verify` never requires it.
 pub const Hit = struct { index: usize, open: bool };
 
+/// Buffer room for an optional tab `modalPrompt`: a latched name plus its text.
+pub const modal_prompt_buf_len = 288;
+
 /// A multi-select row checkbox: unselected, selected, or blocked (a row that
 /// can't be selected — pinned in Outdated, already-installed in Search).
 pub const Check = enum { off, on, blocked };
@@ -232,6 +235,9 @@ pub fn verify(comptime M: type) void {
     // `step`/`update` are the Elm effect seam: they return a `cmd.Cmd` and own the
     // tab's parse storage, so a conforming tab must expose one — reported here.
     if (!@hasDecl(M, "Storage")) @compileError(@typeName(M) ++ ": tab must expose `pub const Storage`");
+    // `modalPrompt(s, buf) ?[]const u8` is OPTIONAL too: a tab with a modal key gate
+    // returns its prompt text so the shell shows it when the body has no rows or the
+    // terminal is too small. It carries the render only; the tab owns the key routing.
     // `hitTest(s, rect, click_row, click_col) ?Hit` is an OPTIONAL contract decl:
     // only tabs with a clickable list expose it, and the shell gates the call on
     // `@hasDecl`. Deliberately not required here, so a tab with no detail pane
