@@ -218,6 +218,22 @@ pub fn readKegSource(
     return readFormulaSource(io, allocator, rb_path);
 }
 
+/// True when the shipped formula source declares the keg keg-only. Only an
+/// unconditional class-level line counts: a modifier (`if OS.mac?`) or a
+/// nested block can switch it off on this host, so those read as linked.
+pub fn declaresKegOnly(src: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, src, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, " \t\r");
+        if (!std.mem.startsWith(u8, line, "  keg_only")) continue;
+        const rest = line["  keg_only".len..];
+        if (rest.len != 0 and rest[0] != ' ') continue;
+        if (std.mem.indexOf(u8, rest, " if ") != null or std.mem.indexOf(u8, rest, " unless ") != null) continue;
+        return true;
+    }
+    return false;
+}
+
 /// Resolve this formula's dependency-scoped placeholder into `buf`.
 /// Null when it declares no matching dependency: guessing would bake a path
 /// to a keg the formula never asked for.
@@ -335,6 +351,9 @@ pub const Formula = struct {
     /// Outer slice allocated through `_parsed.arena`; element strings
     /// live in `_parsed`.
     dependencies: []const []const u8,
+    /// Prefix-relative patterns of slots this formula may take over from
+    /// another keg.
+    link_overwrite: []const []const u8,
     keg_only: bool,
     post_install_defined: bool,
     /// True when the formula carries a non-empty declarative
@@ -581,6 +600,8 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         if (path_component.hasControlByte(dep)) return FormulaError.UnsafePathComponent;
     }
 
+    const link_overwrite = try getStringArray(arena, root, "link_overwrite");
+
     // oldnames (may be absent)
     const oldnames = try getStringArray(arena, root, "oldnames");
 
@@ -708,6 +729,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         .license = license,
         .homepage = homepage,
         .dependencies = dependencies,
+        .link_overwrite = link_overwrite,
         .keg_only = keg_only,
         .post_install_defined = post_install_defined,
         .has_post_install_steps = has_post_install_steps,
@@ -1047,6 +1069,28 @@ test "parseFormula refuses a control byte in dependencies, tap or full_name" {
     var formula = try parseFormula(testing.allocator, ok);
     defer formula.deinit();
     try testing.expectEqualStrings("openssl@3", formula.dependencies[0]);
+}
+
+test "parseFormula reads link_overwrite and defaults to none" {
+    var with = try parseFormula(testing.allocator,
+        \\{"name":"ok","versions":{"stable":"1.0"},"link_overwrite":["bin/openssl","lib/libssl*"]}
+    );
+    defer with.deinit();
+    try testing.expectEqual(@as(usize, 2), with.link_overwrite.len);
+    try testing.expectEqualStrings("bin/openssl", with.link_overwrite[0]);
+    try testing.expectEqualStrings("lib/libssl*", with.link_overwrite[1]);
+
+    inline for (.{
+        \\{"name":"ok","versions":{"stable":"1.0"}}
+        ,
+        \\{"name":"ok","versions":{"stable":"1.0"},"link_overwrite":[]}
+        ,
+        \\{"name":"ok","versions":{"stable":"1.0"},"link_overwrite":"bin/x"}
+    }) |json| {
+        var none = try parseFormula(testing.allocator, json);
+        defer none.deinit();
+        try testing.expectEqual(@as(usize, 0), none.link_overwrite.len);
+    }
 }
 
 test "parseFormula rejects path separators in embedded name or version" {
@@ -1991,4 +2035,13 @@ test "parseFormula reports allocation failure instead of dropping bottle platfor
     try w.writeAll("}}}}");
     // One-shot: a sticky sweep fails the later vulns parse and hides the drop.
     try @import("../testing/one_shot_fail.zig").sweep(parseManyBottles, .{ aw.written(), tags });
+}
+
+test "declaresKegOnly reads only an unconditional class-level declaration" {
+    try testing.expect(declaresKegOnly("class A < Formula\n  keg_only :versioned_formula\nend\n"));
+    try testing.expect(declaresKegOnly("class A < Formula\n  keg_only \"macOS ships it\"\nend\n"));
+    try testing.expect(!declaresKegOnly("class A < Formula\n  keg_only :provided_by_macos if OS.mac?\nend\n"));
+    try testing.expect(!declaresKegOnly("class A < Formula\n  on_linux do\n    keg_only :x\n  end\nend\n"));
+    try testing.expect(!declaresKegOnly("class A < Formula\n  keg_only_thing 1\nend\n"));
+    try testing.expect(!declaresKegOnly(""));
 }

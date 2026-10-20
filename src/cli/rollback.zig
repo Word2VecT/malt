@@ -238,6 +238,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer allocator.free(keg.path);
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
+    const keg_only = storeKegOnly(ctx.io, allocator, prefix, target.sha256, name, target.pkg_version);
     const undo: Undo = .{
         .io = ctx.io,
         .db = &db,
@@ -250,6 +251,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         .cellar_path = current.cellar_path,
         .bin_isolated = current.bin_isolated,
         .abandoned_pkg_version = target.pkg_version,
+        .keg_only = keg_only,
     };
 
     // The target already sits under Cellar/ with no row pointing at it, so
@@ -260,7 +262,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return error.Aborted;
     };
 
-    swapKeg(&db, &linker, current.id, name, target, keg.path, current.bin_isolated) catch {
+    swapKeg(&db, &linker, current.id, name, target, keg.path, current.bin_isolated, keg_only) catch {
         undo.run();
         output.err("Failed to record rollback of {s} in the database", .{name});
         return error.Aborted;
@@ -334,10 +336,14 @@ fn swapKeg(
     target: Entry,
     keg_path: []const u8,
     bin_isolated: bool,
+    keg_only: bool,
 ) !void {
+    const held = linker_mod.isKegLinked(db, keg_id);
     try linker.unlink(keg_id);
     try retargetKegRow(db, keg_id, target.pkg_version, target.sha256, keg_path);
-    try linker.link(keg_path, name, keg_id, bin_isolated);
+    if (try linker.relink(keg_path, name, keg_id, bin_isolated, keg_only, held)) {
+        output.warn("{s}: another keg holds some of its links, so none were restored - run: mt link --overwrite {s}", .{ name, name });
+    }
 }
 
 /// Everything needed to put the machine back the way it was when a swap
@@ -353,6 +359,7 @@ const Undo = struct {
     cellar_path: []const u8,
     bin_isolated: bool,
     abandoned_pkg_version: []const u8,
+    keg_only: bool,
 
     fn run(self: Undo) void {
         // Drop whatever links the swap managed to write before rolling the
@@ -361,9 +368,12 @@ const Undo = struct {
         self.linker.unlink(self.keg_id) catch {};
         self.db.rollback();
         if (self.cellar_path.len > 0) {
-            self.linker.link(self.cellar_path, self.name, self.keg_id, self.bin_isolated) catch {
+            const held = linker_mod.isKegLinked(self.db, self.keg_id);
+            if (self.linker.relink(self.cellar_path, self.name, self.keg_id, self.bin_isolated, self.keg_only, held)) |skipped| {
+                if (skipped) output.warn("{s}: another keg holds some of its links, so none were restored - run: mt link --overwrite {s}", .{ self.name, self.name });
+            } else |_| {
                 output.err("CRITICAL: could not restore symlinks for {s} - run: mt link {s}", .{ self.name, self.name });
-            };
+            }
         }
         cellar.remove(self.io, self.prefix, self.name, self.abandoned_pkg_version) catch {};
     }
@@ -1114,6 +1124,27 @@ fn storeKegPlaceholder(
     return formula_mod.dependencyPlaceholder(buf, prefix, deps);
 }
 
+/// Whether the target's own shipped formula source declares it keg-only.
+/// Unreadable source reads as linked, the behaviour before this check.
+fn storeKegOnly(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    sha256: []const u8,
+    name: []const u8,
+    pkg_version: []const u8,
+) bool {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const keg_path = std.fmt.bufPrint(
+        &path_buf,
+        "{s}/store/{s}/{s}/{s}",
+        .{ prefix, sha256, name, pkg_version },
+    ) catch return false;
+    const src = formula_mod.readKegSource(io, allocator, keg_path, name) orelse return false;
+    defer allocator.free(src);
+    return formula_mod.declaresKegOnly(src);
+}
+
 /// Seed a `<prefix>/store/<sha>/<name>/<pkg_version>/INSTALL_RECEIPT.json`
 /// tree. `delay_ms_after` lets the caller force monotonically increasing
 /// mtimes across calls without depending on filesystem timer resolution
@@ -1601,6 +1632,100 @@ test "retargetKegRow forgets the tap commit so the next upgrade re-checks instea
     try stmt.bindInt(1, keg_id);
     _ = try stmt.step();
     try testing.expect(stmt.columnBool(0));
+}
+
+test "swapKeg leaves a keg-only target unlinked so it cannot take slots back" {
+    const io = std.Options.debug_io;
+    inline for (.{ .{ true, false }, .{ false, true } }) |case| {
+        var s = try Scratch.init("rollback_swap_keg_only");
+        defer s.deinit();
+        var db = try sqlite.Database.open(":memory:");
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path)
+            \\VALUES (1, 'foo', 'foo', '2.0', 'sha-cur', '/nonexistent/Cellar/foo/2.0');
+        );
+        const keg = s.p("/Cellar/foo/1.0");
+        try std.Io.Dir.cwd().createDirPath(io, s.p("/Cellar/foo/1.0/bin"));
+        (try std.Io.Dir.createFileAbsolute(io, s.p("/Cellar/foo/1.0/bin/foo"), .{})).close(io);
+        var linker = linker_mod.Linker.init(io, testing.allocator, &db, s.base);
+        const target: Entry = .{ .pkg_version = "1.0", .sha256 = "sha-old", .mtime_ns = 0 };
+
+        try db.beginTransaction();
+        try swapKeg(&db, &linker, 1, "foo", target, keg, false, case[0]);
+        try db.commit();
+
+        const linked = if (std.Io.Dir.accessAbsolute(io, s.p("/bin/foo"), .{})) |_| true else |_| false;
+        try testing.expectEqual(case[1], linked);
+    }
+}
+
+fn seedHeldKeg(s: *Scratch, db: *sqlite.Database, linker: *linker_mod.Linker) !void {
+    try db.exec(
+        \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (1, 'foo', 'foo', '2.0', 'sha-cur', '/x');
+    );
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar/foo/2.0/bin"));
+    (try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/Cellar/foo/2.0/bin/foo"), .{})).close(fs_test_io);
+    try linker.link(s.p("/Cellar/foo/2.0"), "foo", 1, false);
+}
+
+test "swapKeg keeps the links of a keg-only formula the user linked by hand" {
+    var s = try Scratch.init("rollback_swap_held");
+    defer s.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(fs_test_io, testing.allocator, &db, s.base);
+    try seedHeldKeg(&s, &db, &linker);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar/foo/1.0/bin"));
+    (try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/Cellar/foo/1.0/bin/foo"), .{})).close(fs_test_io);
+    const target: Entry = .{ .pkg_version = "1.0", .sha256 = "sha-old", .mtime_ns = 0 };
+
+    try db.beginTransaction();
+    try swapKeg(&db, &linker, 1, "foo", target, s.p("/Cellar/foo/1.0"), false, true);
+    try db.commit();
+
+    var buf: [512]u8 = undefined;
+    const n = try std.Io.Dir.readLinkAbsolute(fs_test_io, s.p("/bin/foo"), &buf);
+    try testing.expect(std.mem.indexOf(u8, buf[0..n], "/Cellar/foo/1.0/") != null);
+}
+
+test "Undo does not take a keg-only slot back from a successor" {
+    var s = try Scratch.init("rollback_undo_clash");
+    defer s.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(fs_test_io, testing.allocator, &db, s.base);
+    try seedHeldKeg(&s, &db, &linker);
+    // A successor took `bin/foo` over before the rolled-back rows return.
+    try linker.unlink(1);
+    try db.exec("INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path) VALUES (2, 'succ', 'succ', '1', 'sha-s', '/y');");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar/succ/1/bin"));
+    (try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/Cellar/succ/1/bin/foo"), .{})).close(fs_test_io);
+    try linker.link(s.p("/Cellar/succ/1"), "succ", 2, false);
+    try db.exec("INSERT INTO links (keg_id, link_path, target) VALUES (1, '/stale/lib/x', '/stale/t');");
+    try db.beginTransaction();
+
+    const undo: Undo = .{
+        .io = fs_test_io,
+        .db = &db,
+        .linker = &linker,
+        .prefix = s.base,
+        .name = "foo",
+        .keg_id = 1,
+        .cellar_path = s.p("/Cellar/foo/2.0"),
+        .bin_isolated = false,
+        .abandoned_pkg_version = "1.0",
+        .keg_only = true,
+    };
+    undo.run();
+
+    var buf: [512]u8 = undefined;
+    const n = try std.Io.Dir.readLinkAbsolute(fs_test_io, s.p("/bin/foo"), &buf);
+    try testing.expect(std.mem.indexOf(u8, buf[0..n], "/Cellar/succ/") != null);
 }
 
 test "removeCurrentCellarDir wipes the revision-bumped on-disk dir" {
