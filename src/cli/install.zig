@@ -1386,13 +1386,230 @@ test "conflictHint names the one action that actually clears the slot" {
     try std.testing.expect(kegOwnedBy("Cellar/a/1.0", "a"));
 }
 
+/// Homebrew `link_overwrite?`: exact path, directory prefix, or a glob where
+/// `*` spans `/`. `rel` is relative to the prefix.
+fn matchesLinkOverwrite(patterns: []const []const u8, rel: []const u8) bool {
+    for (patterns) |pat| {
+        if (pat.len == 0) continue;
+        if (std.mem.eql(u8, pat, rel)) return true;
+        if (rel.len > pat.len and rel[pat.len] == '/' and std.mem.startsWith(u8, rel, pat)) return true;
+        if (std.mem.indexOfScalar(u8, pat, '*') != null and globMatch(pat, rel)) return true;
+    }
+    return false;
+}
+
+/// `*` matches any run of bytes, `/` included; both ends anchored.
+fn globMatch(pat: []const u8, s: []const u8) bool {
+    var pi: usize = 0;
+    var si: usize = 0;
+    var star: ?usize = null;
+    var mark: usize = 0;
+    while (si < s.len) {
+        if (pi < pat.len and pat[pi] == '*') {
+            star = pi;
+            mark = si;
+            pi += 1;
+        } else if (pi < pat.len and pat[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if (star) |st| {
+            pi = st + 1;
+            mark += 1;
+            si = mark;
+        } else return false;
+    }
+    while (pi < pat.len and pat[pi] == '*') pi += 1;
+    return pi == pat.len;
+}
+
+/// A slot may change hands only when another keg's own symlink holds it and
+/// the formula lists it. A stray file, a foreign link or a clash higher up
+/// the path stays the user's to clear.
+fn mayTakeOver(c: linker_mod.Conflict, prefix: []const u8, name: []const u8, patterns: []const []const u8) bool {
+    if (!c.owned_by_keg or c.structural) return false;
+    if (!c.in_cellar or kegOwnedBy(c.existing_keg, name)) return false;
+    if (c.link_path.len <= prefix.len + 1 or !std.mem.startsWith(u8, c.link_path, prefix) or c.link_path[prefix.len] != '/') return false;
+    return matchesLinkOverwrite(patterns, c.link_path[prefix.len + 1 ..]);
+}
+
+/// A slot taken from another keg, as it stood before the link phase.
+pub const TakenSlot = struct {
+    link_path: []const u8,
+    target: []const u8,
+    /// Owner row, absent for a link malt never recorded.
+    keg_id: ?i64,
+};
+
+/// Record the slots the link phase may replace. Caller frees with `freeTaken`.
+pub fn snapshotTaken(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    found: []const linker_mod.Conflict,
+    prefix: []const u8,
+    name: []const u8,
+    patterns: []const []const u8,
+) ![]TakenSlot {
+    var out: std.ArrayList(TakenSlot) = .empty;
+    errdefer {
+        for (out.items) |t| {
+            allocator.free(t.link_path);
+            allocator.free(t.target);
+        }
+        out.deinit(allocator);
+    }
+    for (found) |c| {
+        if (!mayTakeOver(c, prefix, name, patterns)) continue;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try std.Io.Dir.readLinkAbsolute(io, c.link_path, &buf);
+        const keg_id = try slotOwner(db, c.link_path);
+        const link_path = try allocator.dupe(u8, c.link_path);
+        errdefer allocator.free(link_path);
+        const target = try allocator.dupe(u8, buf[0..n]);
+        errdefer allocator.free(target);
+        try out.append(allocator, .{ .link_path = link_path, .target = target, .keg_id = keg_id });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn freeTaken(allocator: std.mem.Allocator, taken: []const TakenSlot) void {
+    for (taken) |t| {
+        allocator.free(t.link_path);
+        allocator.free(t.target);
+    }
+    allocator.free(taken);
+}
+
+/// Null only when no row exists; a DB failure must not read as "no row".
+fn slotOwner(db: *sqlite.Database, link_path: []const u8) !?i64 {
+    var stmt = try db.prepare("SELECT keg_id FROM links WHERE link_path = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, link_path);
+    if (!try stmt.step()) return null;
+    return stmt.columnInt(0);
+}
+
+/// Put back only the slots a failed link took. A slot someone else holds now
+/// stays theirs, and an intact one is not touched.
+fn restoreTaken(io: std.Io, db: *sqlite.Database, taken: []const TakenSlot, new_keg: []const u8) void {
+    for (taken) |t| {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const restorable = blk: {
+            const n = std.Io.Dir.readLinkAbsolute(io, t.link_path, &buf) catch |err| break :blk err == error.FileNotFound;
+            break :blk linker_mod.Linker.isUnderKeg(buf[0..n], new_keg);
+        };
+        if (!restorable) continue;
+        std.Io.Dir.deleteFileAbsolute(io, t.link_path) catch {};
+        // `unlink` prunes the directories it emptied.
+        if (std.fs.path.dirname(t.link_path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch continue;
+        std.Io.Dir.symLinkAbsolute(io, t.target, t.link_path, .{}) catch continue;
+        const id = t.keg_id orelse continue;
+        var stmt = db.prepare("INSERT OR REPLACE INTO links (keg_id, link_path, target) VALUES (?1, ?2, ?3);") catch continue;
+        defer stmt.finalize();
+        stmt.bindInt(1, id) catch continue;
+        stmt.bindText(2, t.link_path) catch continue;
+        stmt.bindText(3, t.target) catch continue;
+        _ = stmt.step() catch {};
+    }
+}
+
+/// Conflicts the formula may not take over. Caller frees the slice.
+fn blockingConflicts(
+    allocator: std.mem.Allocator,
+    conflicts: []const linker_mod.Conflict,
+    prefix: []const u8,
+    name: []const u8,
+    patterns: []const []const u8,
+) ![]linker_mod.Conflict {
+    var out: std.ArrayList(linker_mod.Conflict) = .empty;
+    errdefer out.deinit(allocator);
+    for (conflicts) |c| {
+        if (!mayTakeOver(c, prefix, name, patterns)) try out.append(allocator, c);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "matchesLinkOverwrite follows the Homebrew pattern rules" {
+    const pats = [_][]const u8{ "bin/openssl", "include/openssl/*", "lib/libssl*", "share/man/man*/*ssl.gz", "lib/cmake" };
+    try std.testing.expect(matchesLinkOverwrite(&pats, "bin/openssl"));
+    try std.testing.expect(matchesLinkOverwrite(&pats, "include/openssl/ssl.h"));
+    try std.testing.expect(matchesLinkOverwrite(&pats, "include/openssl/sub/x.h"));
+    try std.testing.expect(matchesLinkOverwrite(&pats, "lib/libssl.3.dylib"));
+    try std.testing.expect(matchesLinkOverwrite(&pats, "share/man/man1/openssl.gz"));
+    try std.testing.expect(matchesLinkOverwrite(&pats, "lib/cmake/OpenSSL/OpenSSLConfig.cmake"));
+    try std.testing.expect(!matchesLinkOverwrite(&pats, "lib/libcrypto.dylib"));
+    try std.testing.expect(!matchesLinkOverwrite(&pats, "bin/openssl2"));
+    try std.testing.expect(!matchesLinkOverwrite(&pats, "lib/cmakefoo"));
+    try std.testing.expect(!matchesLinkOverwrite(&pats, "include/openssl"));
+    try std.testing.expect(!matchesLinkOverwrite(&.{}, "bin/openssl"));
+}
+
+test "globMatch backtracks and anchors both ends" {
+    try std.testing.expect(globMatch("a*b*c", "aXbYbZc"));
+    try std.testing.expect(globMatch("lib/libssl*", "lib/libssl"));
+    try std.testing.expect(globMatch("*ssl.gz", "man/man1/openssl.gz"));
+    try std.testing.expect(!globMatch("a*b", "abX"));
+    try std.testing.expect(!globMatch("Xa*", "a"));
+    try std.testing.expect(!globMatch("a*c", "a"));
+}
+
+test "matchesLinkOverwrite ignores an empty pattern" {
+    try std.testing.expect(!matchesLinkOverwrite(&.{""}, "bin/openssl"));
+    try std.testing.expect(!matchesLinkOverwrite(&.{""}, ""));
+}
+
+test "blockingConflicts lets a listed slot change hands and keeps the rest" {
+    const a = std.testing.allocator;
+    const pats = [_][]const u8{"lib/libfoo*"};
+    const listed: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0", .in_cellar = true };
+    const unlisted: linker_mod.Conflict = .{ .link_path = "/p/bin/foo", .existing_keg = "Cellar/old/1.0", .in_cellar = true };
+    const stray: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.a", .existing_keg = "existing file", .owned_by_keg = false };
+    const own: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.1.dylib", .existing_keg = "Cellar/new/0.9", .in_cellar = true };
+
+    const left = try blockingConflicts(a, &.{ listed, unlisted, stray, own }, "/p", "new", &pats);
+    defer a.free(left);
+    // A same-name leftover stays blocked: `--force` owns that case.
+    try std.testing.expectEqual(@as(usize, 3), left.len);
+    try std.testing.expectEqualStrings("/p/bin/foo", left[0].link_path);
+    try std.testing.expectEqualStrings("/p/lib/libfoo.a", left[1].link_path);
+    try std.testing.expectEqualStrings("/p/lib/libfoo.1.dylib", left[2].link_path);
+
+    // Nothing listed: every conflict stays, as before.
+    const all = try blockingConflicts(a, &.{ listed, unlisted }, "/p", "new", &.{});
+    defer a.free(all);
+    try std.testing.expectEqual(@as(usize, 2), all.len);
+}
+
+test "mayTakeOver refuses a foreign link and a clash higher up the path" {
+    const pats = [_][]const u8{"lib/libfoo*"};
+    const foreign: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/x/1", .in_cellar = false };
+    const ancestor: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo", .existing_keg = "Cellar/old/1.0", .in_cellar = true, .structural = true };
+    const plain: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0", .in_cellar = true };
+    try std.testing.expect(!mayTakeOver(foreign, "/p", "new", &pats));
+    try std.testing.expect(!mayTakeOver(ancestor, "/p", "new", &pats));
+    try std.testing.expect(mayTakeOver(plain, "/p", "new", &pats));
+}
+
+test "mayTakeOver refuses a conflict that never said it is inside the Cellar" {
+    const unset: linker_mod.Conflict = .{ .link_path = "/p/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0" };
+    try std.testing.expect(!mayTakeOver(unset, "/p", "new", &.{"lib/libfoo*"}));
+}
+
+test "blockingConflicts refuses a slot outside the prefix" {
+    const a = std.testing.allocator;
+    const c: linker_mod.Conflict = .{ .link_path = "/elsewhere/lib/libfoo.dylib", .existing_keg = "Cellar/old/1.0", .in_cellar = true };
+    const left = try blockingConflicts(a, &.{c}, "/p", "new", &.{"lib/libfoo*"});
+    defer a.free(left);
+    try std.testing.expectEqual(@as(usize, 1), left.len);
+}
+
 /// Link + record a materialised keg. Must run serially: linker conflict
 /// checks read live symlink state and SQLite is single-writer.
 ///
 /// The keg's `bin_isolated` is `flags.isolatesDep(job.is_dep)` so direct
 /// kegs always land in PATH even under `--isolate-deps` — the contract is
 /// "isolate transitive deps, never the named package."
-fn linkAndRecord(
+pub fn linkAndRecord(
     io: std.Io,
     environ: std.process.Environ,
     allocator: std.mem.Allocator,
@@ -1422,8 +1639,30 @@ fn linkAndRecord(
     // the link policy — otherwise an isolated dep would trigger a
     // spurious bin/sbin conflict against a keg whose bins were never
     // linked in the first place.
+    var taken: []const TakenSlot = &.{};
+    defer if (taken.len > 0) freeTaken(allocator, taken);
+    var found: []const linker_mod.Conflict = &.{};
+    defer {
+        for (found) |c| {
+            allocator.free(c.link_path);
+            allocator.free(c.existing_keg);
+        }
+        if (found.len > 0) allocator.free(found);
+    }
     if (!job.keg_only) {
-        const conflicts = linker.checkConflicts(keg_path, bin_isolated) catch &.{};
+        found = linker.checkConflicts(keg_path, bin_isolated) catch &.{};
+        // `linker.link` replaces the slots we let through.
+        const conflicts = blockingConflicts(allocator, found, prefix, job.name, formula.link_overwrite) catch found;
+        defer if (conflicts.ptr != found.ptr) allocator.free(conflicts);
+        if (conflicts.len == 0) {
+            // Without the snapshot a failed link could not give the slots back.
+            taken = snapshotTaken(io, allocator, db, found, prefix, job.name, formula.link_overwrite) catch |err| {
+                sink.err("{s}: cannot record the links it would take over: {s}", .{ job.name, @errorName(err) });
+                dropUnrecordedKeg(io, db, prefix, job.name, job.version_str, keg_path);
+                if (flags.force) relinkKegs(db, linker, job.name);
+                return InstallError.LinkFailed;
+            };
+        }
         if (conflicts.len > 0) {
             sink.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
             for (conflicts) |conflict| {
@@ -1451,6 +1690,7 @@ fn linkAndRecord(
             linker.unlink(keg_id) catch {};
             deleteKeg(db, keg_id);
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
+            restoreTaken(io, db, taken, keg_path);
             return InstallError.LinkFailed;
         };
         // `recorded` after both succeed — link rollback undoes the keg

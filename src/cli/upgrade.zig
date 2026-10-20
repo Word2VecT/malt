@@ -914,7 +914,7 @@ fn upgradeFormula(
         // FS rollback: the txn restored old keg/links rows; we still
         // need to recreate the old symlinks (FS isn't transactional)
         // and drop the freshly-materialized new cellar dir.
-        restoreOldLinks(db, &linker, old.cellar_path, name, old.keg_id, old.bin_isolated);
+        restoreOldLinks(db, &linker, old.cellar_path, name, old.keg_id, old.bin_isolated, formula.keg_only);
         cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
         return error.Aborted;
     };
@@ -924,10 +924,7 @@ fn upgradeFormula(
             "Failed to commit upgrade for {s}: {s} ({s})",
             .{ name, @errorName(commit_err), db.errMsg() },
         );
-        db.rollback();
-        // best-effort FS cleanup before falling back to the old version.
-        linker.unlink(new_keg_id) catch {};
-        restoreOldLinks(db, &linker, old.cellar_path, name, old.keg_id, old.bin_isolated);
+        abandonCommit(db, &linker, new_keg_id, old.cellar_path, name, old.keg_id, old.bin_isolated, formula.keg_only);
         cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
         return error.Aborted;
     };
@@ -1666,6 +1663,7 @@ pub fn upgradeDbAtomic(
     new_cellar_path: []const u8,
     bin_isolated: bool,
 ) !i64 {
+    const held = linker_mod.isKegLinked(db, old_keg_id);
     try linker.unlink(old_keg_id);
     // `in_transaction = true` so the upgrade wrapper's outer BEGIN/COMMIT
     // owns atomicity for unlink → record → link → delete; the unified
@@ -1699,26 +1697,52 @@ pub fn upgradeDbAtomic(
         bin_isolated,
         .{ .in_transaction = true },
     );
-    try linker.link(new_cellar_path, formula.name, new_keg_id, bin_isolated);
+    if (try linker.relink(new_cellar_path, formula.name, new_keg_id, bin_isolated, formula.keg_only, held)) {
+        output.warn("{s}: another keg holds some of its links, so none were restored - run: mt link --overwrite {s}", .{ formula.name, formula.name });
+    }
     install_record_mod.deleteKeg(db, old_keg_id);
     return new_keg_id;
+}
+
+/// A commit that failed leaves the new keg's rows in the open transaction.
+/// Unlink them before the rollback discards them, or the new symlinks stay
+/// behind and read as clashes when the old keg's links return.
+fn abandonCommit(
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    new_keg_id: i64,
+    old_cellar_path: []const u8,
+    name: []const u8,
+    old_keg_id: i64,
+    bin_isolated: bool,
+    keg_only: bool,
+) void {
+    linker.unlink(new_keg_id) catch {};
+    db.rollback();
+    restoreOldLinks(db, linker, old_cellar_path, name, old_keg_id, bin_isolated, keg_only);
 }
 
 /// Re-link old version during rollback. Replays the old row's
 /// `bin_isolated` so a partially-rolled-back keg matches the user's
 /// prior intent.
 fn restoreOldLinks(
-    _: *sqlite.Database,
+    db: *sqlite.Database,
     linker: *linker_mod.Linker,
     old_cellar_path: []const u8,
     name: []const u8,
     old_keg_id: i64,
     bin_isolated: bool,
+    keg_only: bool,
 ) void {
     if (old_cellar_path.len == 0) return;
-    linker.link(old_cellar_path, name, old_keg_id, bin_isolated) catch {
+    // A keg-only keg gets back only the links it held, and only if no
+    // successor took a slot since; the rolled-back rows tell which it held.
+    const held = linker_mod.isKegLinked(db, old_keg_id);
+    if (linker.relink(old_cellar_path, name, old_keg_id, bin_isolated, keg_only, held)) |skipped| {
+        if (skipped) output.warn("{s}: another keg holds some of its links, so none were restored - run: mt link --overwrite {s}", .{ name, name });
+    } else |_| {
         output.err("CRITICAL: Failed to restore old symlinks for {s}. Manual intervention may be required.", .{name});
-    };
+    }
 }
 
 /// A table it cannot read is `Unreadable`, never a miss that hands the
@@ -2466,6 +2490,125 @@ test "upgradeDbAtomic re-records dependency edges so cleanup keeps live runtime 
     for (orphans) |o| {
         try std.testing.expect(!std.mem.eql(u8, o, "oniguruma"));
     }
+}
+
+// A keg-only formula owns no public links. If a newer formula took its old
+// slots over, upgrading it must not link them back.
+test "upgradeDbAtomic links a regular formula but leaves a keg-only one unlinked" {
+    inline for (.{ .{ false, true }, .{ true, false } }) |case| {
+        var s = try Scratch.init("upgrade_keg_only");
+        defer s.deinit();
+        var db = try sqlite.Database.open(":memory:");
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path, install_reason)
+            \\VALUES (1, 'foo', 'foo', '1.0', 'sha-old', '/nonexistent/Cellar/foo/1.0', 'direct');
+        );
+        const keg = s.p("/Cellar/foo/2.0");
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar/foo/2.0/bin"));
+        (try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/Cellar/foo/2.0/bin/foo"), .{})).close(fs_test_io);
+
+        const json = if (case[0])
+            \\{"name":"foo","full_name":"foo","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":true,"post_install_defined":false,"versions":{"stable":"2.0"},"dependencies":[]}
+        else
+            \\{"name":"foo","full_name":"foo","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"2.0"},"dependencies":[]}
+        ;
+        var formula = try formula_mod.parseFormula(std.testing.allocator, json);
+        defer formula.deinit();
+        var linker = linker_mod.Linker.init(fs_test_io, std.testing.allocator, &db, s.base);
+
+        try db.beginTransaction();
+        _ = try upgradeDbAtomic(&db, &linker, 1, &formula, "sha-new", keg, false);
+        try db.commit();
+
+        const linked = if (std.Io.Dir.accessAbsolute(fs_test_io, s.p("/bin/foo"), .{})) |_| true else |_| false;
+        try std.testing.expectEqual(case[1], linked);
+    }
+}
+
+fn seedLinkedOldKeg(s: *Scratch, db: *sqlite.Database, linker: *linker_mod.Linker) !void {
+    try db.exec(
+        \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path, install_reason)
+        \\VALUES (1, 'foo', 'foo', '1.0', 'sha-old', '/x', 'direct');
+    );
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar/foo/1.0/bin"));
+    (try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/Cellar/foo/1.0/bin/foo"), .{})).close(fs_test_io);
+    try linker.link(s.p("/Cellar/foo/1.0"), "foo", 1, false);
+}
+
+const keg_only_json =
+    \\{"name":"foo","full_name":"foo","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":true,"post_install_defined":false,"versions":{"stable":"2.0"},"dependencies":[]}
+;
+
+test "upgradeDbAtomic keeps the links of a keg-only formula the user linked by hand" {
+    var s = try Scratch.init("upgrade_keg_only_held");
+    defer s.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(fs_test_io, std.testing.allocator, &db, s.base);
+    try seedLinkedOldKeg(&s, &db, &linker);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar/foo/2.0/bin"));
+    (try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/Cellar/foo/2.0/bin/foo"), .{})).close(fs_test_io);
+    var formula = try formula_mod.parseFormula(std.testing.allocator, keg_only_json);
+    defer formula.deinit();
+
+    try db.beginTransaction();
+    _ = try upgradeDbAtomic(&db, &linker, 1, &formula, "sha-new", s.p("/Cellar/foo/2.0"), false);
+    try db.commit();
+
+    var buf: [512]u8 = undefined;
+    const n = try std.Io.Dir.readLinkAbsolute(fs_test_io, s.p("/bin/foo"), &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "/Cellar/foo/2.0/") != null);
+}
+
+test "restoreOldLinks does not take a keg-only slot back from a successor" {
+    var s = try Scratch.init("restore_keg_only_clash");
+    defer s.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(fs_test_io, std.testing.allocator, &db, s.base);
+    try seedLinkedOldKeg(&s, &db, &linker);
+    // A successor took `bin/foo` over: the old keg is unlinked, the slot is
+    // theirs, and the old keg's rows are back after the rollback.
+    try linker.unlink(1);
+    try db.exec("INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path) VALUES (2, 'succ', 'succ', '1', 'sha-s', '/y');");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar/succ/1/bin"));
+    (try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/Cellar/succ/1/bin/foo"), .{})).close(fs_test_io);
+    try linker.link(s.p("/Cellar/succ/1"), "succ", 2, false);
+    try db.exec("INSERT INTO links (keg_id, link_path, target) VALUES (1, '/stale/lib/x', '/stale/t');");
+
+    restoreOldLinks(&db, &linker, s.p("/Cellar/foo/1.0"), "foo", 1, false, true);
+
+    var buf: [512]u8 = undefined;
+    const n = try std.Io.Dir.readLinkAbsolute(fs_test_io, s.p("/bin/foo"), &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "/Cellar/succ/") != null);
+    try std.testing.expect(!linker_mod.isKegLinked(&db, 1));
+}
+
+test "abandonCommit puts a hand-linked keg-only formula's links back" {
+    var s = try Scratch.init("abandon_commit_held");
+    defer s.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var linker = linker_mod.Linker.init(fs_test_io, std.testing.allocator, &db, s.base);
+    try seedLinkedOldKeg(&s, &db, &linker);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, s.p("/Cellar/foo/2.0/bin"));
+    (try std.Io.Dir.createFileAbsolute(fs_test_io, s.p("/Cellar/foo/2.0/bin/foo"), .{})).close(fs_test_io);
+    var formula = try formula_mod.parseFormula(std.testing.allocator, keg_only_json);
+    defer formula.deinit();
+
+    try db.beginTransaction();
+    const new_id = try upgradeDbAtomic(&db, &linker, 1, &formula, "sha-new", s.p("/Cellar/foo/2.0"), false);
+    // The commit failed: the new keg's links are still on disk.
+    abandonCommit(&db, &linker, new_id, s.p("/Cellar/foo/1.0"), "foo", 1, false, true);
+
+    var buf: [512]u8 = undefined;
+    const n = try std.Io.Dir.readLinkAbsolute(fs_test_io, s.p("/bin/foo"), &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "/Cellar/foo/1.0/") != null);
 }
 
 // A stepped-open lookup statement pins connection A's WAL read snapshot.

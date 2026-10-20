@@ -12,6 +12,13 @@ pub const Conflict = struct {
     /// False when the slot holds a stray file or directory rather than a
     /// keg's symlink: no package owns it, so only the user can clear it.
     owned_by_keg: bool = true,
+    /// An ancestor of the slot clashes, not the slot itself. Linking would
+    /// write inside the other keg, so no override may cover it.
+    structural: bool = false,
+    /// The link points into this prefix's own Cellar. Only such a link may
+    /// change hands; a user's or a cask's link never does. Off by default so
+    /// a conflict that skips the check cannot be taken over.
+    in_cellar: bool = false,
 };
 
 pub const Linker = struct {
@@ -77,6 +84,7 @@ pub const Linker = struct {
                         .link_path = self.allocator.dupe(u8, link_path) catch continue,
                         .existing_keg = self.allocator.dupe(u8, owner orelse "existing directory") catch continue,
                         .owned_by_keg = owner != null,
+                        .structural = true,
                     }) catch continue;
                     continue;
                 }
@@ -87,18 +95,21 @@ pub const Linker = struct {
                 // scanning kegs with many files. `rel` is the full nested
                 // path relative to the linkable dir.
                 var link_target_buf: [1024]u8 = undefined;
-                const existing_keg: []const u8, const owned_by_keg = blk: {
+                const existing_keg: []const u8, const owned_by_keg, const in_cellar = blk: {
                     const n = prefix_dir.readLink(self.io, rel, &link_target_buf) catch |err| switch (err) {
                         error.FileNotFound => continue, // slot is free
                         // Anything else (a regular file, an unreadable entry)
                         // is occupied by something we cannot verify; `link`
                         // would replace it, so refuse here.
-                        else => break :blk .{ "existing file", false },
+                        else => break :blk .{ "existing file", false, false },
                     };
                     const target = link_target_buf[0..n];
                     if (isUnderKeg(target, keg_path)) continue; // our own link
-                    // Targets look like: /opt/malt/Cellar/<name>/<ver>/bin/<file>
-                    break :blk .{ extractKegFromPath(target) orelse target, true };
+                    // Targets look like: /opt/malt/Cellar/<name>/<ver>/bin/<file>.
+                    const root = std.mem.trimEnd(u8, self.prefix, "/");
+                    const ours = std.mem.startsWith(u8, target, root) and
+                        std.mem.startsWith(u8, target[root.len..], "/Cellar/");
+                    break :blk .{ extractKegFromPath(target) orelse target, true, ours };
                 };
 
                 var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -107,6 +118,7 @@ pub const Linker = struct {
                     .link_path = self.allocator.dupe(u8, link_path) catch continue,
                     .existing_keg = self.allocator.dupe(u8, existing_keg) catch continue,
                     .owned_by_keg = owned_by_keg,
+                    .in_cellar = in_cellar,
                 }) catch continue;
             }
         }
@@ -193,7 +205,7 @@ pub const Linker = struct {
 
     /// True when `target` lies inside `keg_path`. A bare prefix match is not
     /// enough: `Cellar/foo/1.0_1` continues `Cellar/foo/1.0` byte-for-byte.
-    fn isUnderKeg(target: []const u8, keg_path: []const u8) bool {
+    pub fn isUnderKeg(target: []const u8, keg_path: []const u8) bool {
         return target.len > keg_path.len and
             std.mem.startsWith(u8, target, keg_path) and
             target[keg_path.len] == '/';
@@ -351,6 +363,38 @@ pub const Linker = struct {
             stmt.reset() catch {};
             return e;
         };
+    }
+
+    /// Put back a keg-only keg's links after an upgrade or rollback.
+    /// A keg-only keg owns no public links by default, so this links only a
+    /// keg that held some (`held`, a hand `mt link`). If another keg holds
+    /// one of its slots it links nothing: a full relink would take them back
+    /// from a successor that took them over. True when it skipped for that
+    /// reason, so the caller can tell the user.
+    pub fn linkHeld(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64, bin_isolated: bool, held: bool) !bool {
+        if (!held) return false;
+        const found = try self.checkConflicts(keg_path, bin_isolated);
+        defer {
+            for (found) |c| {
+                self.allocator.free(c.link_path);
+                self.allocator.free(c.existing_keg);
+            }
+            if (found.len > 0) self.allocator.free(found);
+        }
+        if (found.len > 0) {
+            // Drop the stale rows of the slots that were not put back.
+            self.unlink(keg_id) catch {};
+            return true;
+        }
+        try self.link(keg_path, name, keg_id, bin_isolated);
+        return false;
+    }
+
+    /// `link` for a regular keg, `linkHeld` for a keg-only one.
+    pub fn relink(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64, bin_isolated: bool, keg_only: bool, held: bool) !bool {
+        if (keg_only) return self.linkHeld(keg_path, name, keg_id, bin_isolated, held);
+        try self.link(keg_path, name, keg_id, bin_isolated);
+        return false;
     }
 
     /// Create `opt/{name} -> Cellar/{name}/{version}` symlink.
