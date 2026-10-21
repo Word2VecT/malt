@@ -1521,6 +1521,252 @@ test "materializeRubyFormula keeps the keg and warns when the service is refused
     try testing.expect(std.mem.indexOf(u8, warns.items, "could not register service for badsvc") != null);
 }
 
+/// Occupies `<prefix>/bin/<leaf>` with a symlink to `target`, or a stray file.
+fn plantSlot(prefix: []const u8, leaf: []const u8, target: ?[]const u8) !void {
+    const bin = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{prefix});
+    defer testing.allocator.free(bin);
+    try test_io.cwd().createDirPath(std.Options.debug_io, bin);
+    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin, leaf });
+    defer testing.allocator.free(slot);
+    if (target) |t| {
+        try test_io.cwd().symLink(std.Options.debug_io, t, slot, .{});
+    } else try writeFile(slot, "stray");
+}
+
+fn refusedInstall(prefix: [:0]const u8, name: []const u8, sha: []const u8, force: bool, errs: *std.ArrayList(u8)) !void {
+    const sink: malt.install_sink.OutputSink = .{
+        .ctx = errs,
+        .writeInfo = swallowLine,
+        .writeWarn = swallowLine,
+        .writeSuccess = swallowLine,
+        .writeErr = captureWarn,
+        .show_progress = false,
+    };
+    const url = try std.fmt.allocPrint(testing.allocator, "https://example.invalid/{s}-1.0.tar.gz", .{name});
+    defer testing.allocator.free(url);
+    const full = try std.fmt.allocPrint(testing.allocator, "user/repo/{s}", .{name});
+    defer testing.allocator.free(full);
+    try testing.expectError(error.LinkFailed, installFromWarmCacheWith(prefix, .{
+        .name = name,
+        .full_name = full,
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = url,
+        .sha256 = sha,
+    }, force, sink));
+}
+
+test "materializeRubyFormula refuses a slot another keg links and leaves it alone" {
+    // Taking the slot would leave the first keg unlinked after the second
+    // is uninstalled.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "5e" ** 32;
+    try seedKegArchive(prefix, "second", sha);
+    const owner = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/first/1.0/bin/second", .{prefix});
+    defer testing.allocator.free(owner);
+    try plantSlot(prefix, "second", owner);
+
+    var errs: std.ArrayList(u8) = .empty;
+    defer errs.deinit(testing.allocator);
+    try refusedInstall(prefix, "second", sha, false, &errs);
+
+    try testing.expect(std.mem.indexOf(u8, errs.items, "1 symlink conflict(s) detected:") != null);
+    try testing.expect(std.mem.indexOf(u8, errs.items, "already linked by Cellar/first/1.0") != null);
+    try testing.expect(std.mem.indexOf(u8, errs.items, "Uninstall the conflicting package first.") != null);
+
+    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/second", .{prefix});
+    defer testing.allocator.free(slot);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try test_io.cwd().readLink(std.Options.debug_io, slot, &buf);
+    try testing.expectEqualStrings(owner, buf[0..n]);
+
+    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/second/1.0", .{prefix});
+    defer testing.allocator.free(cellar);
+    try testing.expectError(error.FileNotFound, test_io.cwd().access(std.Options.debug_io, cellar, .{}));
+}
+
+test "materializeRubyFormula --force upgrade refused over another keg's slot keeps the prior keg and the slot" {
+    // The failed upgrade must not relink the old keg over the slot the
+    // other keg took, or uninstalling it later would unlink that keg.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha1 = "6f" ** 32;
+    const sha2 = "6e" ** 32;
+    try seedKegArchive(prefix, "foo", sha1);
+    try seedKegArchive(prefix, "foo", sha2);
+    const quiet: malt.install_sink.OutputSink = .{
+        .ctx = null,
+        .writeInfo = swallowLine,
+        .writeWarn = swallowLine,
+        .writeSuccess = swallowLine,
+        .writeErr = swallowLine,
+        .show_progress = false,
+    };
+    try installFromWarmCacheWith(prefix, .{
+        .name = "foo",
+        .full_name = "user/repo/foo",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://example.invalid/foo-1.0.tar.gz",
+        .sha256 = sha1,
+    }, false, quiet);
+
+    // Another keg takes the slot after the first install.
+    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/foo", .{prefix});
+    defer testing.allocator.free(slot);
+    const owner = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/bar/1.0/bin/foo", .{prefix});
+    defer testing.allocator.free(owner);
+    try test_io.cwd().deleteFile(std.Options.debug_io, slot);
+    try test_io.cwd().symLink(std.Options.debug_io, owner, slot, .{});
+
+    var errs: std.ArrayList(u8) = .empty;
+    defer errs.deinit(testing.allocator);
+    const sink: malt.install_sink.OutputSink = .{
+        .ctx = &errs,
+        .writeInfo = swallowLine,
+        .writeWarn = swallowLine,
+        .writeSuccess = swallowLine,
+        .writeErr = captureWarn,
+        .show_progress = false,
+    };
+    try testing.expectError(error.LinkFailed, installFromWarmCacheWith(prefix, .{
+        .name = "foo",
+        .full_name = "user/repo/foo",
+        .tap_label = "user/repo",
+        .version = "2.0",
+        .url = "https://example.invalid/foo-2.0.tar.gz",
+        .sha256 = sha2,
+    }, true, sink));
+    try testing.expect(std.mem.indexOf(u8, errs.items, "already linked by Cellar/bar/1.0") != null);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try test_io.cwd().readLink(std.Options.debug_io, slot, &buf);
+    try testing.expectEqualStrings(owner, buf[0..n]);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const row = try kegRevisionAndPath(prefix, "foo", &path_buf);
+    try testing.expect(std.mem.endsWith(u8, row.cellar_path, "/Cellar/foo/1.0"));
+}
+
+test "materializeRubyFormula --force still refuses a slot another keg links" {
+    // --force only sweeps the same name's links, as on the core path.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "6d" ** 32;
+    try seedKegArchive(prefix, "second", sha);
+    const owner = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/first/1.0/bin/second", .{prefix});
+    defer testing.allocator.free(owner);
+    try plantSlot(prefix, "second", owner);
+
+    var errs: std.ArrayList(u8) = .empty;
+    defer errs.deinit(testing.allocator);
+    try refusedInstall(prefix, "second", sha, true, &errs);
+    try testing.expect(std.mem.indexOf(u8, errs.items, "already linked by Cellar/first/1.0") != null);
+
+    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/second", .{prefix});
+    defer testing.allocator.free(slot);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try test_io.cwd().readLink(std.Options.debug_io, slot, &buf);
+    try testing.expectEqualStrings(owner, buf[0..n]);
+}
+
+test "materializeRubyFormula --force refuses a same-name link that points outside the prefix" {
+    // A foreign Cellar (another package manager) owns that slot, not malt.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "9c" ** 32;
+    try seedKegArchive(prefix, "second", sha);
+    const foreign = try std.fmt.allocPrint(testing.allocator, "{s}/elsewhere/Cellar/second/1.0/bin/second", .{prefix});
+    defer testing.allocator.free(foreign);
+    try plantSlot(prefix, "second", foreign);
+
+    var errs: std.ArrayList(u8) = .empty;
+    defer errs.deinit(testing.allocator);
+    try refusedInstall(prefix, "second", sha, true, &errs);
+
+    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/second", .{prefix});
+    defer testing.allocator.free(slot);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try test_io.cwd().readLink(std.Options.debug_io, slot, &buf);
+    try testing.expectEqualStrings(foreign, buf[0..n]);
+}
+
+test "materializeRubyFormula --force upgrade works under a prefix with a trailing slash" {
+    // The keg's own links read "<prefix>//Cellar"; they must not look foreign.
+    const base = try scratchPrefix();
+    defer cleanupPrefix(base);
+    const prefix = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/", .{base}, 0);
+    defer testing.allocator.free(prefix);
+    const sha1 = "4a" ** 32;
+    const sha2 = "4b" ** 32;
+    try seedKegArchive(prefix, "slashy", sha1);
+    try seedKegArchive(prefix, "slashy", sha2);
+    const quiet: malt.install_sink.OutputSink = .{
+        .ctx = null,
+        .writeInfo = swallowLine,
+        .writeWarn = swallowLine,
+        .writeSuccess = swallowLine,
+        .writeErr = swallowLine,
+        .show_progress = false,
+    };
+    inline for (.{ .{ "1.0", sha1, false }, .{ "2.0", sha2, true } }) |v| {
+        try installFromWarmCacheWith(prefix, .{
+            .name = "slashy",
+            .full_name = "user/repo/slashy",
+            .tap_label = "user/repo",
+            .version = v[0],
+            .url = "https://example.invalid/slashy.tar.gz",
+            .sha256 = v[1],
+        }, v[2], quiet);
+    }
+}
+
+test "materializeRubyFormula refuses a stray file in the slot with the file hint" {
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "7a" ** 32;
+    try seedKegArchive(prefix, "second", sha);
+    try plantSlot(prefix, "second", null);
+
+    var errs: std.ArrayList(u8) = .empty;
+    defer errs.deinit(testing.allocator);
+    try refusedInstall(prefix, "second", sha, false, &errs);
+    try testing.expect(std.mem.indexOf(u8, errs.items, "Remove the conflicting file or directory first.") != null);
+
+    const slot = try std.fmt.allocPrint(testing.allocator, "{s}/bin/second", .{prefix});
+    defer testing.allocator.free(slot);
+    const body = try test_io.cwd().readFileAlloc(std.Options.debug_io, slot, testing.allocator, .unlimited);
+    defer testing.allocator.free(body);
+    try testing.expectEqualStrings("stray", body);
+}
+
+test "materializeRubyFormula --force reinstall of the same keg is not a conflict" {
+    // The sweep must run before the check, or the keg's own links block it.
+    const prefix = try scratchPrefix();
+    defer cleanupPrefix(prefix);
+    const sha = "8b" ** 32;
+    try seedKegArchive(prefix, "again", sha);
+    const resolved: install_local.ResolvedRubyFormula = .{
+        .name = "again",
+        .full_name = "user/repo/again",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://example.invalid/again-1.0.tar.gz",
+        .sha256 = sha,
+    };
+    const quiet: malt.install_sink.OutputSink = .{
+        .ctx = null,
+        .writeInfo = swallowLine,
+        .writeWarn = swallowLine,
+        .writeSuccess = swallowLine,
+        .writeErr = swallowLine,
+        .show_progress = false,
+    };
+    try installFromWarmCacheWith(prefix, resolved, false, quiet);
+    try installFromWarmCacheWith(prefix, resolved, true, quiet);
+}
+
 test "materializeRubyFormula re-registers a service once on the upgrade shape" {
     // `upgradeTapFormula` re-runs this tail with force=true; the row is
     // keyed by label so a second pass must update, not duplicate.

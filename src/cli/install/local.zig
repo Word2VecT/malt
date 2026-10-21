@@ -1311,6 +1311,34 @@ pub fn materializeRubyFormula(
     db.beginTransaction() catch return InstallError.RecordFailed;
     errdefer db.rollback();
 
+    // Before the sweep: a refusal then leaves every prior link untouched.
+    // `--force` clears the keg's own links, so only other kegs' slots block.
+    // `link_overwrite` is not parsed from a .rb, so no slot may change hands.
+    // A layout change (file <-> directory) of the keg's own links is refused too.
+    const all: []linker_mod.Conflict = linker.checkConflicts(cellar_path, false) catch &.{};
+    var blocking: usize = 0;
+    for (all) |c| {
+        if (force and c.owned_by_keg and c.in_cellar and !c.structural and install_mod.kegOwnedBy(c.existing_keg, resolved.name)) {
+            allocator.free(c.link_path);
+            allocator.free(c.existing_keg);
+        } else {
+            all[blocking] = c;
+            blocking += 1;
+        }
+    }
+    const found = all[0..blocking];
+    defer {
+        for (found) |c| {
+            allocator.free(c.link_path);
+            allocator.free(c.existing_keg);
+        }
+        if (all.len > 0) allocator.free(all);
+    }
+    if (found.len > 0) {
+        install_mod.reportConflicts(sink, found, resolved.name, force);
+        return InstallError.LinkFailed;
+    }
+
     // `--force` pre-link: clear every same-name prior install's
     // symlinks so the upcoming linker.link does not collide. Rows
     // + dependencies stay so the recordKeg INSERT OR REPLACE below

@@ -854,8 +854,8 @@ fn runInstall(
                 if (skippableRecommended(exec_opts.recommended, pkg_name, e)) {
                     sink.warn("{s} is recommended, not required — continuing without it.", .{pkg_name});
                 } else {
-                    // Both refusals already printed their own line.
-                    if (e != InstallError.BuildFromSourceUnsupported and e != InstallError.UnpinnedChecksum) {
+                    // These refusals already printed their own line.
+                    if (e != InstallError.BuildFromSourceUnsupported and e != InstallError.UnpinnedChecksum and e != InstallError.LinkFailed) {
                         sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                     }
                     failed_count += 1;
@@ -909,7 +909,7 @@ fn runInstall(
                             // The sibling is where it was actually found, so its
                             // error is the useful one; the cask miss above is
                             // just how we got here.
-                            if (tap_err != InstallError.BuildFromSourceUnsupported) {
+                            if (tap_err != InstallError.BuildFromSourceUnsupported and tap_err != InstallError.LinkFailed) {
                                 sink.err("Failed to install {s}: {s}", .{ slug, @errorName(tap_err) });
                             }
                             failed_count += 1;
@@ -1353,20 +1353,29 @@ fn runInstall(
     }
 }
 
+/// One report for every install path, so the wording cannot drift.
+pub fn reportConflicts(sink: OutputSink, conflicts: []const linker_mod.Conflict, name: []const u8, force: bool) void {
+    sink.err("{s}: {d} symlink conflict(s) detected:", .{ name, conflicts.len });
+    for (conflicts) |conflict| {
+        sink.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
+    }
+    sink.err("{s}", .{conflictHint(conflicts, name, force)});
+}
+
 /// `--force` only sweeps links a keg of the same name left behind; another
 /// package's links need an uninstall, and a stray file or directory in the
 /// slot has to be removed by hand.
-fn conflictHint(conflicts: []const linker_mod.Conflict, name: []const u8) []const u8 {
+fn conflictHint(conflicts: []const linker_mod.Conflict, name: []const u8, force: bool) []const u8 {
     var other_keg = false;
     for (conflicts) |c| {
         if (!c.owned_by_keg) return "Remove the conflicting file or directory first.";
         if (!kegOwnedBy(c.existing_keg, name)) other_keg = true;
     }
-    return if (other_keg) "Uninstall the conflicting package first." else "Use --force to overwrite.";
+    return if (other_keg or force) "Uninstall the conflicting package first." else "Use --force to overwrite.";
 }
 
 /// `existing_keg` is `Cellar/<name>/<ver>`; match the name segment only.
-fn kegOwnedBy(existing_keg: []const u8, name: []const u8) bool {
+pub fn kegOwnedBy(existing_keg: []const u8, name: []const u8) bool {
     const marker = "Cellar/";
     if (!std.mem.startsWith(u8, existing_keg, marker)) return false;
     const rest = existing_keg[marker.len..];
@@ -1377,10 +1386,12 @@ test "conflictHint names the one action that actually clears the slot" {
     const same: linker_mod.Conflict = .{ .link_path = "/p/bin/a", .existing_keg = "Cellar/a/1.0" };
     const other: linker_mod.Conflict = .{ .link_path = "/p/bin/b", .existing_keg = "Cellar/ab/2.0" };
     const file: linker_mod.Conflict = .{ .link_path = "/p/bin/c", .existing_keg = "existing file", .owned_by_keg = false };
-    try std.testing.expectEqualStrings("Use --force to overwrite.", conflictHint(&.{same}, "a"));
-    try std.testing.expectEqualStrings("Uninstall the conflicting package first.", conflictHint(&.{other}, "a"));
-    try std.testing.expectEqualStrings("Uninstall the conflicting package first.", conflictHint(&.{ same, other }, "a"));
-    try std.testing.expectEqualStrings("Remove the conflicting file or directory first.", conflictHint(&.{ same, other, file }, "a"));
+    try std.testing.expectEqualStrings("Use --force to overwrite.", conflictHint(&.{same}, "a", false));
+    try std.testing.expectEqualStrings("Uninstall the conflicting package first.", conflictHint(&.{other}, "a", false));
+    try std.testing.expectEqualStrings("Uninstall the conflicting package first.", conflictHint(&.{ same, other }, "a", false));
+    try std.testing.expectEqualStrings("Remove the conflicting file or directory first.", conflictHint(&.{ same, other, file }, "a", false));
+    // A forced run already tried to overwrite, so that hint would mislead.
+    try std.testing.expectEqualStrings("Uninstall the conflicting package first.", conflictHint(&.{same}, "a", true));
     // Name compare is whole-segment: `a` must not claim `ab`'s keg.
     try std.testing.expect(!kegOwnedBy("Cellar/ab/2.0", "a"));
     try std.testing.expect(kegOwnedBy("Cellar/a/1.0", "a"));
@@ -1664,11 +1675,7 @@ pub fn linkAndRecord(
             };
         }
         if (conflicts.len > 0) {
-            sink.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
-            for (conflicts) |conflict| {
-                sink.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
-            }
-            sink.err("{s}", .{conflictHint(conflicts, job.name)});
+            reportConflicts(sink, conflicts, job.name, flags.force);
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         }
