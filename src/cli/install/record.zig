@@ -112,6 +112,8 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         // Raise site names the formula whose deps failed; the inner
         // install already printed which dep and why.
         InstallError.DependencyFailed,
+        // Every raise site prints the conflict or link failure itself.
+        InstallError.LinkFailed,
         => true,
 
         InstallError.NoPackages,
@@ -120,7 +122,6 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         InstallError.CaskNotFound,
         InstallError.NoBottle,
         InstallError.StoreFailed,
-        InstallError.LinkFailed,
         // Some RecordFailed paths emit a classified err first, others
         // (db.beginTransaction failure) do not — leave the generic
         // dispatch summary on so the silent path still surfaces.
@@ -583,4 +584,10 @@ test "recordKegFields inherits an existing pin via COALESCE-MAX on force-reinsta
     _ = try recordKegFields(&db, fields, .{});
 
     try testing.expectEqual(@as(i64, 1), try readIntCol(&db, "SELECT pinned FROM kegs WHERE name = ?1;", "pinned-pkg"));
+}
+
+test "localErrorIsAnnounced keeps the conflict report as the only line for LinkFailed" {
+    try testing.expect(localErrorIsAnnounced(InstallError.LinkFailed));
+    // Silent raise sites still need the generic summary.
+    try testing.expect(!localErrorIsAnnounced(InstallError.RecordFailed));
 }
