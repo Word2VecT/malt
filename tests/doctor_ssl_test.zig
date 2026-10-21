@@ -101,6 +101,7 @@ test "ca-certificates installed + cert.pem present: a clean ok row" {
     const prefix = try makePrefix("linked", true, true);
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/opt/openssl@3");
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
@@ -257,4 +258,34 @@ test "both majors installed, only openssl@4 linked: warns about openssl@3" {
     defer buf.deinit(testing.allocator);
     try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
     try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@3's cert.pem isn't linked") != null);
+}
+
+test "no major installed with only a plain-file leftover: warns about openssl@4" {
+    // shellenv no longer exports the copy, so doctor must not call it fine.
+    const prefix = try makePrefix("nomajor_plain", true, true);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.warn_status, sslRun(ctxFor(prefix), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "openssl@4's cert.pem isn't linked") != null);
+}
+
+test "no major installed with a live leftover link: a clean ok row" {
+    // shellenv exports this link, so doctor must agree it is fine.
+    const prefix = try makePrefix("nomajor_live", true, false);
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try mkdirIn(prefix, "/etc/ca-certificates");
+    try touchIn(prefix, "/etc/ca-certificates/cert.pem");
+    try mkdirIn(prefix, "/etc/openssl@3");
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/etc/openssl@3/cert.pem", .{prefix});
+    defer testing.allocator.free(link);
+    try test_io.cwd().symLink(std.Options.debug_io, "../ca-certificates/cert.pem", link, .{});
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try testing.expectEqual(doctor.CheckResult.ok, sslRun(ctxFor(prefix), &buf));
+    try testing.expect(std.mem.indexOf(u8, buf.items, "isn't linked") == null);
 }
