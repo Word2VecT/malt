@@ -85,7 +85,7 @@ fn parseField(field: []const u8, spec: FieldSpec, is_weekday: bool) CronError!?S
     if (field.len == 0) return CronError.CronMalformed;
     if (field.len == 1 and field[0] == '*') return null;
 
-    var set = Set.initEmpty();
+    var set = Set.empty;
     var it = std.mem.splitScalar(u8, field, ',');
     while (it.next()) |part| try parsePart(part, spec, is_weekday, &set);
     if (set.count() == 0) return CronError.CronMalformed;
@@ -100,7 +100,7 @@ fn parsePart(part: []const u8, spec: FieldSpec, is_weekday: bool, set: *Set) Cro
 
     var base = part;
     var step: u8 = 1;
-    if (std.mem.indexOfScalar(u8, part, '/')) |slash| {
+    if (std.mem.findScalar(u8, part, '/')) |slash| {
         base = part[0..slash];
         step = try parseNum(part[slash + 1 ..]);
         if (step == 0) return CronError.CronMalformed;
@@ -111,7 +111,7 @@ fn parsePart(part: []const u8, spec: FieldSpec, is_weekday: bool, set: *Set) Cro
     if (base.len == 1 and base[0] == '*') {
         lo = spec.min;
         hi = spec.max;
-    } else if (std.mem.indexOfScalar(u8, base, '-')) |dash| {
+    } else if (std.mem.findScalar(u8, base, '-')) |dash| {
         lo = try parseNum(base[0..dash]);
         hi = try parseNum(base[dash + 1 ..]);
     } else {
@@ -165,7 +165,7 @@ fn fillEntries(sets: [5]?Set, out: []CalendarInterval) void {
         }
     }
 
-    var idx = [_]usize{0} ** 5;
+    var idx = @as([5]usize, @splat(0));
     var oi: usize = 0;
     while (oi < out.len) : (oi += 1) {
         var v: [5]?u8 = undefined;

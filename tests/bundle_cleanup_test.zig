@@ -18,7 +18,7 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     // we assert it stays intact.
     const dir = try test_io.uniqueTempPath(testing.allocator, "bundle_cleanup", "cli_dry_run");
     defer testing.allocator.free(dir);
-    const dir_z = try testing.allocator.dupeZ(u8, dir);
+    const dir_z = try testing.allocator.dupeSentinel(u8, dir, 0);
     defer testing.allocator.free(dir_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, dir_z);
@@ -27,10 +27,10 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     _ = c.setenv("MALT_PREFIX", dir_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{dir_z});
+    const db_dir = try testing.allocator.print("{s}/db", .{dir_z});
     defer testing.allocator.free(db_dir);
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
-    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    const db_path = try testing.allocator.printSentinel("{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     {
         var db = try sqlite.Database.open(db_path);
@@ -60,7 +60,7 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     }
 
     // Brewfile keeps wget + ghostty; cleanup must propose ripgrep, jq, iterm2.
-    const bf_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{dir_z});
+    const bf_path = try testing.allocator.print("{s}/Brewfile", .{dir_z});
     defer testing.allocator.free(bf_path);
     {
         const f = try test_io.cwd().createFile(std.Options.debug_io, bf_path, .{});
@@ -77,7 +77,7 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     defer malt.output.endStderrCapture();
     try malt.cli_bundle.execute(&ctx, testing.allocator, &.{ "cleanup", "--dry-run", bf_path });
     // Says what the real run would do, like every other preview.
-    try testing.expect(std.mem.indexOf(u8, captured.items, "would uninstall the packages above") != null);
+    try testing.expect(std.mem.find(u8, captured.items, "would uninstall the packages above") != null);
 
     var db = try sqlite.Database.open(db_path);
     defer db.close();

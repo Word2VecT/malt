@@ -70,8 +70,8 @@ pub const ServiceDef = struct {
 /// `dyld: Library not loaded` errors because bottles hard-code the
 /// full path in LC_LOAD_DYLIB entries.
 pub fn pkgVersion(buf: []u8, version: []const u8, revision: i64) ![]const u8 {
-    if (revision <= 0) return std.fmt.bufPrint(buf, "{s}", .{version});
-    return std.fmt.bufPrint(buf, "{s}_{d}", .{ version, revision });
+    if (revision <= 0) return std.mem.print(buf, "{s}", .{version});
+    return std.mem.print(buf, "{s}_{d}", .{ version, revision });
 }
 
 /// A bottle placeholder whose value is a path inside one of the formula's
@@ -161,17 +161,17 @@ fn scanDeclaredDeps(out: [][]const u8, rb_source: []const u8, scan: DepScan) usi
         // friends are platform predicates, not kegs.
         const rest = trimmed[decl.len..];
         if (rest.len == 0 or rest[0] != '"') continue;
-        const close = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse continue;
+        const close = std.mem.findScalarPos(u8, rest, 1, '"') orelse continue;
 
         // Trailing comments are prose, not markers - a `:recommended` mentioned
         // there once made a required dep's failure look survivable.
         const full_tail = rest[close..];
-        const tail = if (std.mem.indexOfScalar(u8, full_tail, '#')) |h| full_tail[0..h] else full_tail;
-        if (std.mem.indexOf(u8, tail, ":build") != null) continue;
+        const tail = if (std.mem.findScalar(u8, full_tail, '#')) |h| full_tail[0..h] else full_tail;
+        if (std.mem.find(u8, tail, ":build") != null) continue;
         switch (scan) {
             .runtime => {},
-            .install => if (std.mem.indexOf(u8, tail, ":optional") != null) continue,
-            .recommended => if (std.mem.indexOf(u8, tail, ":recommended") == null) continue,
+            .install => if (std.mem.find(u8, tail, ":optional") != null) continue,
+            .recommended => if (std.mem.find(u8, tail, ":recommended") == null) continue,
         }
 
         if (n < out.len) out[n] = rest[1..close];
@@ -213,8 +213,8 @@ pub fn readKegSource(
     keg_path: []const u8,
     name: []const u8,
 ) ?[]u8 {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rb_path = std.fmt.bufPrint(&path_buf, "{s}/.brew/{s}.rb", .{ keg_path, name }) catch return null;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const rb_path = std.mem.print(&path_buf, "{s}/.brew/{s}.rb", .{ keg_path, name }) catch return null;
     return readFormulaSource(io, allocator, rb_path);
 }
 
@@ -228,7 +228,7 @@ pub fn declaresKegOnly(src: []const u8) bool {
         if (!std.mem.startsWith(u8, line, "  keg_only")) continue;
         const rest = line["  keg_only".len..];
         if (rest.len != 0 and rest[0] != ' ') continue;
-        if (std.mem.indexOf(u8, rest, " if ") != null or std.mem.indexOf(u8, rest, " unless ") != null) continue;
+        if (std.mem.find(u8, rest, " if ") != null or std.mem.find(u8, rest, " unless ") != null) continue;
         return true;
     }
     return false;
@@ -252,7 +252,7 @@ pub fn dependencyPlaceholder(
             // component, and withholding beats baking one that hops out of it.
             if (!path_component.isPathComponent(dep)) return null;
 
-            const value = std.fmt.bufPrint(
+            const value = std.mem.print(
                 buf,
                 "{s}/opt/{s}/{s}",
                 .{ prefix, dep, entry.subpath },
@@ -300,7 +300,7 @@ pub fn perlPlaceholder(
     // screened like every other tap-controlled string that reaches disk.
     if (brewed) |dep| brewed_keg: {
         if (!path_component.isPathComponent(dep)) break :brewed_keg;
-        const value = std.fmt.bufPrint(buf, "{s}/opt/{s}/bin/perl", .{ prefix, dep }) catch break :brewed_keg;
+        const value = std.mem.print(buf, "{s}/opt/{s}/bin/perl", .{ prefix, dep }) catch break :brewed_keg;
         return .{ .token = perl_token, .value = value };
     }
     return .{ .token = perl_token, .value = systemPerlPath(cask_variation.runningMacosMajor()) };
@@ -715,7 +715,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
     // instead of re-formatting per call site.
     const pkg_version_str = blk: {
         if (revision <= 0) break :blk version_str;
-        break :blk try std.fmt.allocPrint(arena, "{s}_{d}", .{ version_str, revision });
+        break :blk try arena.print("{s}_{d}", .{ version_str, revision });
     };
 
     return Formula{
@@ -790,7 +790,7 @@ pub fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, json_data: [
 pub const ParsedPkgVersion = struct { version: []const u8, revision: i64 };
 
 pub fn parsePkgVersion(label: []const u8) ParsedPkgVersion {
-    const us = std.mem.lastIndexOfScalar(u8, label, '_') orelse
+    const us = std.mem.findScalarLast(u8, label, '_') orelse
         return .{ .version = label, .revision = 0 };
     const tail = label[us + 1 ..];
     if (tail.len == 0) return .{ .version = label, .revision = 0 };
@@ -936,7 +936,7 @@ test "isCurrent follows the tap in both directions" {
 test "isCurrent declines to prove currency on an overflowing version" {
     // pkgVersion overflows past 256 bytes; the safe answer is `unprovable`, which
     // callers route to a re-check, never to `current`.
-    const long = "1." ** 200;
+    const long = std.mem.asBytes(&@as([200][2]u8, @splat("1.".*)));
     try testing.expectEqual(Currency.unprovable, isCurrent(long, 3, "whatever"));
 }
 
@@ -1177,11 +1177,10 @@ test "parseFormula refuses a formula with no stable version" {
 }
 
 // A digest that is a usable store key; the tests below vary it.
-const store_key_sha = "0123456789abcdef" ** 4;
+const store_key_sha = std.mem.asBytes(&@as([4][16]u8, @splat("0123456789abcdef".*)));
 
 fn bottleFormulaJson(files_json: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        testing.allocator,
+    return testing.allocator.print(
         \\{{"name":"bottled","versions":{{"stable":"1.0"}},"bottle":{{"stable":{{"root_url":"https://example.test","files":{s}}}}}}}
     ,
         .{files_json},
@@ -1189,8 +1188,7 @@ fn bottleFormulaJson(files_json: []const u8) ![]u8 {
 }
 
 fn oneBottleJson(sha_value_json: []const u8) ![]u8 {
-    const files = try std.fmt.allocPrint(
-        testing.allocator,
+    const files = try testing.allocator.print(
         \\{{"all":{{"cellar":":any","url":"https://example.test/a","sha256":{s}}}}}
     ,
         .{sha_value_json},
@@ -1207,10 +1205,10 @@ test "parseFormula drops a bottle entry whose sha256 is not a store key" {
         "null",
         "42",
         "\"\"",
-        "\"" ++ "a" ** 63 ++ "\"",
-        "\"" ++ "a" ** 65 ++ "\"",
-        "\"" ++ "g" ** 64 ++ "\"",
-        "\"" ++ "A" ** 64 ++ "\"",
+        "\"" ++ &@as([63]u8, @splat('a')) ++ "\"",
+        "\"" ++ &@as([65]u8, @splat('a')) ++ "\"",
+        "\"" ++ &@as([64]u8, @splat('g')) ++ "\"",
+        "\"" ++ &@as([64]u8, @splat('A')) ++ "\"",
     };
     for (bad) |sha_value| {
         const json = try oneBottleJson(sha_value);
@@ -1237,8 +1235,7 @@ test "parseFormula drops a bottle entry whose sha256 is not a store key" {
 }
 
 fn vulnsFormulaJson(vulns_json: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        testing.allocator,
+    return testing.allocator.print(
         \\{{"name":"advised","versions":{{"stable":"1.0"}},"vulnerabilities":{s}}}
     ,
         .{vulns_json},
@@ -1318,8 +1315,7 @@ test "parseFormula keeps a bottle entry whose sha256 is a store key" {
 test "parseFormula drops only the malformed platform entry" {
     // One broken platform must not cost the formula its other bottles, nor
     // take it out of the listings entirely.
-    const files = try std.fmt.allocPrint(
-        testing.allocator,
+    const files = try testing.allocator.print(
         \\{{"arm64_sequoia":{{"cellar":":any","url":"u1","sha256":""}},"sequoia":{{"cellar":":any","url":"u2","sha256":"nope"}},"all":{{"cellar":":any","url":"u3","sha256":"{s}"}}}}
     ,
         .{store_key_sha},
@@ -1339,19 +1335,19 @@ test "parseFormula drops only the malformed platform entry" {
 /// One bottle-map entry for this arch's `<codename>` tag; `sha_char` makes
 /// each entry's digest tell the tests which tag was picked.
 inline fn hostBottle(comptime codename: []const u8, comptime sha_char: []const u8) []const u8 {
-    const prefix = if (builtin.cpu.arch == .aarch64) "arm64_" else "";
+    const prefix = if (builtin.target.cpu.arch == .aarch64) "arm64_" else "";
     return otherBottle(prefix ++ codename, sha_char);
 }
 
 inline fn otherBottle(comptime key: []const u8, comptime sha_char: []const u8) []const u8 {
-    return "\"" ++ key ++ "\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ sha_char ** 64 ++ "\"}";
+    return "\"" ++ key ++ "\":{\"cellar\":\":any\",\"url\":\"u\",\"sha256\":\"" ++ &@as([64]u8, @splat(sha_char[0])) ++ "\"}";
 }
 
 test "resolveBottleFor never picks a bottle built for a newer macOS than the host" {
     const tahoe_sequoia = "{" ++ hostBottle("tahoe", "a") ++ "," ++ hostBottle("sequoia", "b") ++ "}";
     const golden_tahoe = "{" ++ hostBottle("golden_gate", "c") ++ "," ++ hostBottle("tahoe", "a") ++ "}";
     // The other arch's tag for the same release must never stand in.
-    const foreign_sequoia = "{" ++ otherBottle(if (builtin.cpu.arch == .aarch64) "sequoia" else "arm64_sequoia", "b") ++ "}";
+    const foreign_sequoia = "{" ++ otherBottle(if (builtin.target.cpu.arch == .aarch64) "sequoia" else "arm64_sequoia", "b") ++ "}";
     const Case = struct { files: []const u8, host: ?u32, want: ?u8 };
     const cases = [_]Case{
         // Homebrew stopped building sonoma: refuse rather than pour tahoe.
@@ -1382,7 +1378,7 @@ test "resolveBottleFor never picks a bottle built for a newer macOS than the hos
         defer formula.deinit();
         const got = resolveBottleFor(&formula, c.host);
         if (c.want) |sha_char| {
-            try testing.expectEqualStrings(&([_]u8{sha_char} ** 64), (try got).sha256);
+            try testing.expectEqualStrings(&(@as([64]u8, @splat(sha_char))), (try got).sha256);
         } else {
             try testing.expectError(FormulaError.NoBottleAvailable, got);
         }
@@ -1493,14 +1489,14 @@ fn kegSourceFixture(io: std.Io, tag: []const u8, body: []const u8) ![]u8 {
     var rand: [8]u8 = undefined;
     io.random(&rand);
     const hex = std.fmt.bytesToHex(rand, .lower);
-    const keg = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_keg_src_{s}_{s}", .{ hex[0..], tag });
+    const keg = try testing.allocator.print("/tmp/malt_keg_src_{s}_{s}", .{ hex[0..], tag });
     errdefer testing.allocator.free(keg);
 
-    const brew_dir = try std.fmt.allocPrint(testing.allocator, "{s}/.brew", .{keg});
+    const brew_dir = try testing.allocator.print("{s}/.brew", .{keg});
     defer testing.allocator.free(brew_dir);
     try std.Io.Dir.cwd().createDirPath(io, brew_dir);
 
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/pkg.rb", .{brew_dir});
+    const rb = try testing.allocator.print("{s}/pkg.rb", .{brew_dir});
     defer testing.allocator.free(rb);
     const f = try std.Io.Dir.createFileAbsolute(io, rb, .{});
     try f.writeStreamingAll(io, body);
@@ -2030,7 +2026,7 @@ test "parseFormula reports allocation failure instead of dropping bottle platfor
     try w.writeAll("{\"name\":\"many\",\"versions\":{\"stable\":\"1.0\"},\"bottle\":{\"stable\":{\"files\":{");
     for (0..tags) |i| {
         if (i > 0) try w.writeByte(',');
-        try w.print("\"tag{d}\":{{\"cellar\":\":any\",\"url\":\"https://x/{d}\",\"sha256\":\"{s}\"}}", .{ i, i, "a" ** 64 });
+        try w.print("\"tag{d}\":{{\"cellar\":\":any\",\"url\":\"https://x/{d}\",\"sha256\":\"{s}\"}}", .{ i, i, &@as([64]u8, @splat('a')) });
     }
     try w.writeAll("}}}}");
     // One-shot: a sticky sweep fails the later vulns parse and hides the drop.

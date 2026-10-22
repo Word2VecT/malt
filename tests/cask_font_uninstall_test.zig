@@ -44,7 +44,7 @@ const Fixture = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const base = try test_io.uniqueTempPath(arena.allocator(), "font_uninstall", tag);
-        const base_z = try arena.allocator().dupeZ(u8, base);
+        const base_z = try arena.allocator().dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
         return .{ .arena = arena, .base = base_z };
@@ -52,8 +52,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,
@@ -78,7 +77,7 @@ test "uninstall unlinks every font listed in the manifest, then drops Caskroom a
     try putFile(io, font_a, "AAA");
     try putFile(io, font_b, "BBB");
     const manifest_path = fx.p("Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME);
-    const manifest_body = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}", .{ font_a, font_b });
+    const manifest_body = try testing.allocator.print("{s}\n{s}", .{ font_a, font_b });
     defer testing.allocator.free(manifest_body);
     try cask_font.writeManifest(io, manifest_path, manifest_body);
 
@@ -118,7 +117,7 @@ test "uninstall removes only manifested fonts and tolerates a stale entry" {
     // stale entry must not abort uninstall, and Keep.ttf (never recorded here)
     // must survive — the manifest is the exact record of what this cask placed.
     const manifest_path = fx.p("Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME);
-    const manifest_body = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}", .{ font_a, fx.p("Fonts/Gone.ttf") });
+    const manifest_body = try testing.allocator.print("{s}\n{s}", .{ font_a, fx.p("Fonts/Gone.ttf") });
     defer testing.allocator.free(manifest_body);
     try cask_font.writeManifest(io, manifest_path, manifest_body);
 

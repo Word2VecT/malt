@@ -75,7 +75,7 @@ fn serveCapturingToken(fx: *TokenFixture) void {
 }
 
 fn envWithLongGitlabToken() std.process.Environ {
-    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ "t" ** 600};
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=" ++ &@as([600]u8, @splat('t'))};
     return .{ .block = .{ .slice = entries[0..1 :null] } };
 }
 
@@ -97,7 +97,7 @@ test "getRawFile: gitlab raw fetch carries a 600-byte token in full through the 
     defer server_thread.join();
 
     var url_buf: [80]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/-/raw/glow.rb", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/-/raw/glow.rb", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, envWithLongGitlabToken(), std.testing.allocator);
@@ -107,7 +107,7 @@ test "getRawFile: gitlab raw fetch carries a 600-byte token in full through the 
     defer resp.deinit();
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expectEqual(@as(usize, 600), fx.token_len);
-    try std.testing.expectEqualStrings("t" ** 600, fx.token_buf[0..fx.token_len]);
+    try std.testing.expectEqualStrings(&@as([600]u8, @splat('t')), fx.token_buf[0..fx.token_len]);
 }
 
 test "getRawFile: github raw fetch carries no auth header even with MALT_GITHUB_TOKEN set" {
@@ -125,7 +125,7 @@ test "getRawFile: github raw fetch carries no auth header even with MALT_GITHUB_
     defer server_thread.join();
 
     var url_buf: [80]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/Formula/glow.rb", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/Formula/glow.rb", .{port});
 
     var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     var http = client.HttpClient.initWith(&inner, io, envWithToken(), std.testing.allocator);

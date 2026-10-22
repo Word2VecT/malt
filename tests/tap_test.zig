@@ -340,7 +340,7 @@ test "list URL projection follows rebind end-to-end" {
 test "describeResolveError(NotFound) names the --repo remediation" {
     var buf: [512]u8 = undefined;
     const msg = tap.describeResolveError(&buf, error.NotFound, .github, "github.com");
-    try testing.expect(std.mem.indexOf(u8, msg, "--repo") != null);
+    try testing.expect(std.mem.find(u8, msg, "--repo") != null);
 }
 
 test "updateCommit replaces an existing pin" {
@@ -598,21 +598,21 @@ test "classifyResolveStatus: 401 (bad auth) is distinct from rate limit" {
 test "describeResolveError: github RateLimited names MALT_GITHUB_TOKEN" {
     var buf: [512]u8 = undefined;
     const msg = tap.describeResolveError(&buf, tap.TapError.RateLimited, .github, "github.com");
-    try testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") != null);
-    try testing.expect(std.mem.indexOf(u8, msg, "rate limit") != null);
+    try testing.expect(std.mem.find(u8, msg, "MALT_GITHUB_TOKEN") != null);
+    try testing.expect(std.mem.find(u8, msg, "rate limit") != null);
 }
 
 test "describeResolveError: github NotFound explains the homebrew- prefix rule" {
     var buf: [512]u8 = undefined;
     const msg = tap.describeResolveError(&buf, tap.TapError.NotFound, .github, "github.com");
-    try testing.expect(std.mem.indexOf(u8, msg, "homebrew-") != null);
+    try testing.expect(std.mem.find(u8, msg, "homebrew-") != null);
 }
 
 test "describeResolveError: github NetworkError mentions connectivity" {
     var buf: [512]u8 = undefined;
     const msg = tap.describeResolveError(&buf, tap.TapError.NetworkError, .github, "github.com");
-    try testing.expect(std.mem.indexOf(u8, msg, "etwork") != null or
-        std.mem.indexOf(u8, msg, "onnect") != null);
+    try testing.expect(std.mem.find(u8, msg, "etwork") != null or
+        std.mem.find(u8, msg, "onnect") != null);
 }
 
 test "describeResolveError: github MalformedJson is distinct from ResolveFailed" {
@@ -625,9 +625,9 @@ test "describeResolveError: github MalformedJson is distinct from ResolveFailed"
 
 test "describeResolveError: every forge × TapError variant gets a non-empty hint" {
     inline for (.{ .github, .gitlab, .gitea }) |f| {
-        inline for (@typeInfo(tap.TapError).error_set.?) |e| {
+        inline for (@typeInfo(tap.TapError).error_set.error_names.?) |e| {
             var buf: [512]u8 = undefined;
-            const err = @field(tap.TapError, e.name);
+            const err = @field(tap.TapError, e);
             const msg = tap.describeResolveError(&buf, err, f, "example.com");
             try testing.expect(msg.len > 0);
         }

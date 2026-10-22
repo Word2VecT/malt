@@ -29,7 +29,7 @@ const TestTracker = struct {
 
 /// Body big enough that the transfer is worth reporting on, small enough to
 /// keep the fixture in the binary.
-const payload = "malt-progress-fixture-" ** 256;
+const payload = std.mem.asBytes(&@as([256][22]u8, @splat("malt-progress-fixture-".*)));
 
 const Stub = struct { io: std.Io, listener: *std.Io.net.Server };
 
@@ -67,7 +67,7 @@ test "HTTP GET with progress callback reports every byte of the body" {
     };
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/payload", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/payload", .{port});
     var resp = try http.getWithHeaders(url, &.{}, cb, .transport_only);
     defer resp.deinit();
     // Join before the listener's deferred close: closing a socket a thread is
@@ -101,7 +101,7 @@ test "HTTP GET without a progress callback still returns the whole body" {
     defer http.deinit();
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/payload", .{port});
+    const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/payload", .{port});
     var resp = try http.get(url);
     defer resp.deinit();
     t.join();

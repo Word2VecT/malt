@@ -5,22 +5,22 @@ const color = @import("../ui/color.zig");
 const scroll_list = @import("scroll_list.zig");
 
 pub const Tab = enum { search, installed, outdated, services, doctor };
-pub const count = @typeInfo(Tab).@"enum".fields.len;
+pub const count = @typeInfo(Tab).@"enum".field_names.len;
 
 /// Cycle to the next tab, wrapping after the last so `tab` is a closed loop.
 pub fn next(t: Tab) Tab {
-    return @enumFromInt((@as(usize, @intFromEnum(t)) + 1) % count);
+    return @fromBackingInt(@intCast((@as(usize, @backingInt(t)) + 1) % count));
 }
 
 /// Cycle to the previous tab, wrapping before the first — the reverse of `next`.
 pub fn prev(t: Tab) Tab {
-    return @enumFromInt((@as(usize, @intFromEnum(t)) + count - 1) % count);
+    return @fromBackingInt(@intCast((@as(usize, @backingInt(t)) + count - 1) % count));
 }
 
 /// `'1'`–`'5'` jump straight to a tab; any other byte is not a jump.
 pub fn fromDigit(b: u8) ?Tab {
     if (b < '1' or b >= '1' + count) return null;
-    return @enumFromInt(b - '1');
+    return @fromBackingInt(@intCast(b - '1'));
 }
 
 /// The single accent seam for tab titles. Resolved through the active theme so
@@ -74,7 +74,7 @@ pub fn render(buf: []u8, active: Tab, titles: [count][]const u8, cols: u16) []co
     for (titles, 0..) |t, i| {
         if (i != 0) append(buf, &len, sep);
         append(buf, &len, accentCode()); // every title carries the accent
-        if (i == @intFromEnum(active)) { // active is a reverse-video, bold block
+        if (i == @backingInt(active)) { // active is a reverse-video, bold block
             append(buf, &len, color.Style.reverse.code());
             append(buf, &len, color.Style.bold.code());
         }
@@ -95,7 +95,7 @@ pub fn tabAt(titles: [count][]const u8, cols: u16, click_col: u16) ?Tab {
     for (titles, 0..) |t, i| {
         const w = visibleWidth(t);
         if (click_col < first) return null; // landed in the divider before this title
-        if (click_col < first + w) return @enumFromInt(i);
+        if (click_col < first + w) return @fromBackingInt(@intCast(i));
         first += w + sep_w;
     }
     return null; // past the last title
@@ -113,7 +113,7 @@ test "tabAt maps the first and last column of every title to that tab" {
     var first: u16 = 1;
     for (test_titles, 0..) |t, i| {
         const w: u16 = @intCast(visibleWidth(t));
-        const want: Tab = @enumFromInt(i);
+        const want: Tab = @fromBackingInt(@intCast(i));
         try std.testing.expectEqual(want, tabAt(test_titles, 80, first).?);
         try std.testing.expectEqual(want, tabAt(test_titles, 80, first + w - 1).?); // span boundary
         first += w + @as(u16, @intCast(visibleWidth(sep)));
@@ -143,7 +143,7 @@ test "tabAt agrees with the column render actually draws, whichever tab is activ
     for ([_]Tab{ .search, .installed, .doctor }) |active| {
         var buf: [256]u8 = undefined;
         const out = render(&buf, active, test_titles, 80);
-        const at = std.mem.indexOf(u8, out, "Installed").?;
+        const at = std.mem.find(u8, out, "Installed").?;
         const col: u16 = @intCast(visibleWidth(out[0..at]) + 1);
         try std.testing.expectEqual(installed_span.first, col);
         try std.testing.expectEqual(Tab.installed, tabAt(test_titles, 80, col).?);
@@ -177,15 +177,15 @@ test "fromDigit maps 1-5 and rejects everything else" {
 test "render divides tabs, reverse+bolds the active, accents the rest" {
     var buf: [256]u8 = undefined;
     const out = render(&buf, .outdated, test_titles, 80);
-    try std.testing.expect(std.mem.indexOf(u8, out, sep) != null); // a divider between tabs
+    try std.testing.expect(std.mem.find(u8, out, sep) != null); // a divider between tabs
     // active: accent + reverse + bold + title + reset
     var ab: [64]u8 = undefined;
-    const active = try std.fmt.bufPrint(&ab, "{s}{s}{s}Outdated{s}", .{ accentCode(), color.Style.reverse.code(), color.Style.bold.code(), color.Style.reset.code() });
-    try std.testing.expect(std.mem.indexOf(u8, out, active) != null);
+    const active = try std.mem.print(&ab, "{s}{s}{s}Outdated{s}", .{ accentCode(), color.Style.reverse.code(), color.Style.bold.code(), color.Style.reset.code() });
+    try std.testing.expect(std.mem.find(u8, out, active) != null);
     // inactive: accent + title (no reverse/bold) + reset
     var ib: [64]u8 = undefined;
-    const inactive = try std.fmt.bufPrint(&ib, "{s}Installed{s}", .{ accentCode(), color.Style.reset.code() });
-    try std.testing.expect(std.mem.indexOf(u8, out, inactive) != null);
+    const inactive = try std.mem.print(&ib, "{s}Installed{s}", .{ accentCode(), color.Style.reset.code() });
+    try std.testing.expect(std.mem.find(u8, out, inactive) != null);
 }
 
 test "render truncates to the column budget without counting SGR escapes" {

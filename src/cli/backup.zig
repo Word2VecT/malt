@@ -84,7 +84,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // ── Open the database ────────────────────────────────────────────────
     const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
+    const db_path = std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return Error.DatabaseError;
 
     var db = schema_report.openPreviewable(ctx.io, db_path, output.isDryRun()) catch {
@@ -167,7 +167,7 @@ pub fn writeRows(w: *std.Io.Writer, db: *sqlite.Database, include_versions: bool
                     w.print(local_note_prefix ++ "{s} {s}\n", .{ name, path }) catch return RowsError.WriteFailed;
                     warnLocal(name, path);
                 } else {
-                    output.warnAlways(install_args.unprintable_local_fmt ++ "; it is left out of the backup", .{ std.zig.fmtString(name), std.zig.fmtString(path) });
+                    output.warnAlways(install_args.unprintable_local_fmt ++ "; it is left out of the backup", .{ output.escaped(name), output.escaped(path) });
                 }
                 continue;
             }
@@ -238,7 +238,7 @@ pub fn warnLocal(name: []const u8, path: []const u8) void {
 fn qualify(buf: []u8, tap: []const u8, name: []const u8) RowsError![]const u8 {
     const owner = install_args.thirdPartyTap(tap);
     if (owner.len == 0) return name;
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ owner, name }) catch {
+    return std.mem.print(buf, "{s}/{s}", .{ owner, name }) catch {
         // No legitimate slug overflows this; a bare name here would be a
         // line restore cannot use.
         output.err("Tap label too long for {s} ({s})", .{ name, tap });
@@ -306,7 +306,7 @@ fn executeJson(
                 if (install_args.localRecipePrintable(name, path))
                     warnLocal(name, path)
                 else
-                    output.warn(install_args.unprintable_local_fmt ++ "; the backup keeps it without a rebuild command", .{ std.zig.fmtString(name), std.zig.fmtString(path) });
+                    output.warn(install_args.unprintable_local_fmt ++ "; the backup keeps it without a rebuild command", .{ output.escaped(name), output.escaped(path) });
                 continue;
             }
             const tap = a.dupe(u8, install_args.thirdPartyTap(tap_label)) catch
@@ -379,7 +379,7 @@ fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8, count: u
     path_write.writeFile(ctx.io, path, bytes) catch |e| switch (e) {
         // On a parent-dir failure the offending path is its dirname.
         error.MakeParentDirFailed => {
-            output.err("Failed to create {s}", .{std.fs.path.dirname(path) orelse path});
+            output.err("Failed to create {s}", .{std.Io.Dir.path.dirname(path) orelse path});
             return error.Aborted;
         },
         error.OpenFileFailed => {
@@ -590,23 +590,23 @@ pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) !Parsed {
         // Restore prints every entry and install refuses these names, so a
         // shared or hand-edited line is named, escaped, and left out.
         if (path_component.hasControlByte(entry.name) or path_component.hasControlByte(entry.version)) {
-            output.warnAlways("Skipping `{f}`: it holds a control character", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            output.warnAlways("Skipping `{f}`: it holds a control character", .{output.escaped(std.mem.trim(u8, line, " \t\r\n"))});
             skipped += 1;
             continue;
         }
         if (!isEntryName(entry.kind, entry.name)) {
-            output.warnAlways("Skipping `{f}`: it does not name a package", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            output.warnAlways("Skipping `{f}`: it does not name a package", .{output.escaped(std.mem.trim(u8, line, " \t\r\n"))});
             skipped += 1;
             continue;
         }
         if (entry.kind == .service and entry.version.len > 0) {
-            output.warnAlways("Skipping `{f}`: a service line takes no version", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            output.warnAlways("Skipping `{f}`: a service line takes no version", .{output.escaped(std.mem.trim(u8, line, " \t\r\n"))});
             skipped += 1;
             continue;
         }
         // One such name makes install refuse the whole restore batch.
         if (install_args.isSelfInstall(entry.name)) {
-            output.warnAlways("Skipping `{f}`: restore never installs malt itself", .{std.zig.fmtString(std.mem.trim(u8, line, " \t\r\n"))});
+            output.warnAlways("Skipping `{f}`: restore never installs malt itself", .{output.escaped(std.mem.trim(u8, line, " \t\r\n"))});
             skipped += 1;
             continue;
         }
@@ -645,8 +645,7 @@ pub fn defaultBackupPath(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8
     const month_day = year_day.calculateMonthDay();
 
     const day_of_month: u16 = @as(u16, month_day.day_index) + 1;
-    return std.fmt.allocPrint(
-        allocator,
+    return allocator.print(
         "malt-backup-{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}-{d:0>2}-{d:0>2}.txt",
         .{
             year_day.year,
@@ -681,8 +680,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -694,8 +692,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -974,14 +971,14 @@ test "writeRows drops a local note that would print a terminal control byte" {
 
     try std.testing.expectEqual(@as(usize, 0), count);
     try std.testing.expectEqualStrings("", aw.written());
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\xc2\x80") == null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\xc2\x9b") == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, 0x1b) == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\xc2\x80") == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "\xc2\x9b") == null);
+    try std.testing.expect(std.mem.findScalar(u8, buf.items, 0x1b) == null);
     // Name and recipe path, escaped: after `purge --wipe` this line is the
     // only record of where the recipe was.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "l\\x1bc (/w/lc.rb) is a local formula whose name or recipe path holds a control character") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ld\\xc2\\x80 (/w/ld.rb) is a local formula") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lb (/w/x\\xc2\\x9b2Jy/lb.rb) is a local formula") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "l\\x1bc (/w/lc.rb) is a local formula whose name or recipe path holds a control character") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "ld\\xc2\\x80 (/w/ld.rb) is a local formula") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "lb (/w/x\\xc2\\x9b2Jy/lb.rb) is a local formula") != null);
 }
 
 test "writeRows keeps a local note whose path is clean or plain UTF-8" {
@@ -1023,9 +1020,9 @@ test "writeRows still names a dropped local keg under --quiet" {
 
     _ = try writeRows(&aw.writer, &db, true, false);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lx (/w/x\\ry/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "lx (/w/x\\ry/lx.rb) is a local formula whose name or recipe path holds a control character") != null);
     // A hint built from the scrubbed path would name a file that does not exist.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "mt install --local") == null);
+    try std.testing.expect(std.mem.find(u8, buf.items, "mt install --local") == null);
 }
 
 test "writeRows aborts on an unreadable table instead of truncating" {
@@ -1045,7 +1042,7 @@ test "writeRows refuses a tap label the qualified slug cannot hold" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
-    const long_tap = "x" ** 300;
+    const long_tap = &@as([300]u8, @splat('x'));
     try db.exec("INSERT INTO casks(token, name, version, url, tap) VALUES ('foo', 'Foo', '1.0', 'https://x/foo.dmg', '" ++ long_tap ++ "');");
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
@@ -1057,7 +1054,7 @@ test "writeRows refuses a formula tap label the qualified slug cannot hold" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
-    const long_tap = "x" ** 300;
+    const long_tap = &@as([300]u8, @splat('x'));
     try db.exec("INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path, tap) VALUES ('foo', 'foo', '1.0', 'a', '/c/foo', '" ++ long_tap ++ "');");
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();

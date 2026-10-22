@@ -23,7 +23,7 @@ pub fn cloneTree(io: std.Io, allocator: std.mem.Allocator, src_path: []const u8,
 
     // clonefile(2) is libc-style: -1 on error with errno set globally.
     // Read errno directly; std.posix.errno expects a Zig-syscall return.
-    const e: std.c.E = @enumFromInt(std.c._errno().*);
+    const e: std.c.E = @fromBackingInt(@intCast(std.c._errno().*));
     switch (e) {
         .OPNOTSUPP => {
             copyTreeFallback(io, allocator, src_path, dst_path) catch return error.IoError;
@@ -72,7 +72,7 @@ pub fn copyTreeFallback(io: std.Io, allocator: std.mem.Allocator, src_path: []co
                 dst_dir.createDirPath(io, entry.path) catch |err| captureFirst(&first_err, err);
             },
             .file => {
-                if (std.fs.path.dirname(entry.path)) |parent| {
+                if (std.Io.Dir.path.dirname(entry.path)) |parent| {
                     dst_dir.createDirPath(io, parent) catch |err| captureFirst(&first_err, err);
                 }
                 std.Io.Dir.copyFile(entry.dir, entry.basename, dst_dir, entry.path, io, .{}) catch |err|

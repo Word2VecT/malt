@@ -100,7 +100,7 @@ const TempCacheDir = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const base = try test_io.uniqueTempPath(arena.allocator(), "search", tag);
-        const p = try arena.allocator().dupeZ(u8, base);
+        const p = try arena.allocator().dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, p);
         return .{ .arena = arena, .path = p };
@@ -113,13 +113,13 @@ const TempCacheDir = struct {
 
     fn writeCacheFile(self: *TempCacheDir, rel: []const u8, content: []const u8) !void {
         var api_buf: [512]u8 = undefined;
-        const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
+        const api_dir = try std.mem.print(&api_buf, "{s}/api", .{self.path});
         test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
-        const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.path, rel });
+        const full = try std.mem.print(&path_buf, "{s}/api/{s}", .{ self.path, rel });
         const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
         defer f.close(std.Options.debug_io);
         try f.writeStreamingAll(std.Options.debug_io, content);
