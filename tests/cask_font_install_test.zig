@@ -45,7 +45,7 @@ const Fixture = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const base = try test_io.uniqueTempPath(arena.allocator(), "font_install", tag);
-        const base_z = try arena.allocator().dupeZ(u8, base);
+        const base_z = try arena.allocator().dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
         return .{ .arena = arena, .base = base_z };
@@ -53,8 +53,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,
@@ -111,7 +110,7 @@ test "placeExtracted routes a font cask: places files and returns the Caskroom m
     try expectFileBody(io, hack, "HACK");
 
     // Manifest lists every placed absolute path, newline-joined.
-    const manifest_body = try std.fmt.allocPrint(testing.allocator, "{s}\n{s}", .{ fira, hack });
+    const manifest_body = try testing.allocator.print("{s}\n{s}", .{ fira, hack });
     defer testing.allocator.free(manifest_body);
     try expectFileBody(io, app_path, manifest_body);
 }

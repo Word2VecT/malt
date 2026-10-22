@@ -55,7 +55,7 @@ const RecordingSink = struct {
 test "installAll routes the per-keg failure line through the injected sink" {
     const unique = try test_io.uniqueTempPath(testing.allocator, "install_sink", "route");
     defer testing.allocator.free(unique);
-    const prefix_z = try testing.allocator.dupeZ(u8, unique);
+    const prefix_z = try testing.allocator.dupeSentinel(u8, unique, 0);
     defer testing.allocator.free(prefix_z);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
@@ -98,7 +98,7 @@ fn runUnresolvable(
 ) anyerror!void {
     const unique = try test_io.uniqueTempPath(testing.allocator, "install_sink", suffix);
     defer testing.allocator.free(unique);
-    const prefix = try testing.allocator.dupeZ(u8, unique);
+    const prefix = try testing.allocator.dupeSentinel(u8, unique, 0);
     defer testing.allocator.free(prefix);
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
@@ -127,7 +127,7 @@ test "default sink routes the failure line to ui/output" {
     // No sink supplied → InstallAllOpts defaults to the terminal sink, so
     // the per-keg error must land on the global stderr exactly as today.
     try runUnresolvable(install_sink.terminal, "default", &out_buf);
-    try testing.expect(std.mem.indexOf(u8, out_buf.items, "zz_nonexistent_formula_xyz") != null);
+    try testing.expect(std.mem.find(u8, out_buf.items, "zz_nonexistent_formula_xyz") != null);
 }
 
 test "silent sink quiets the failure line but the install still fails" {

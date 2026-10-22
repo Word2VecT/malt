@@ -91,7 +91,7 @@ pub fn hostSliceOffset(data: []const u8) ?u64 {
         macho.FAT_MAGIC_64, macho.FAT_CIGAM_64 => true,
         else => return null,
     };
-    const host: macho.cpu_type_t = if (@import("builtin").cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
+    const host: macho.cpu_type_t = if (@import("builtin").target.cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
     const size = fatArchSize(is64);
     var offset: usize = 8;
     for (0..std.mem.readInt(u32, data[4..8], .big)) |_| {
@@ -122,11 +122,11 @@ pub fn minMacosMajor(data: []const u8) ?u32 {
         const body = data[offset..][0..cmdsize];
         offset += cmdsize;
         // The packed version is xxxx.yy.zz; only the major matters here.
-        if (cmd == @intFromEnum(macho.LC.BUILD_VERSION) and cmdsize >= 16) {
-            if (std.mem.readInt(u32, body[8..12], .little) != @intFromEnum(macho.PLATFORM.MACOS)) return null;
+        if (cmd == @backingInt(macho.LC.BUILD_VERSION) and cmdsize >= 16) {
+            if (std.mem.readInt(u32, body[8..12], .little) != @backingInt(macho.PLATFORM.MACOS)) return null;
             return std.mem.readInt(u32, body[12..16], .little) >> 16;
         }
-        if (cmd == @intFromEnum(macho.LC.VERSION_MIN_MACOSX) and cmdsize >= 12) {
+        if (cmd == @backingInt(macho.LC.VERSION_MIN_MACOSX) and cmdsize >= 12) {
             return std.mem.readInt(u32, body[8..12], .little) >> 16;
         }
     }
@@ -301,7 +301,7 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
         if (cmd_end[1] != 0 or cmd_end[0] > data.len)
             return ParseError.InvalidLoadCommand;
 
-        const cmd_int = @intFromEnum(lc.cmd);
+        const cmd_int = @backingInt(lc.cmd);
 
         switch (lc.cmd) {
             .ID_DYLIB, .LOAD_DYLIB, .LOAD_WEAK_DYLIB, .REEXPORT_DYLIB => {
@@ -494,7 +494,7 @@ test "readFatArch decodes the 32-bit layout big-endian" {
 }
 
 test "readFatArch widens 32-bit fields instead of mangling them" {
-    var entry: [20]u8 = [_]u8{0} ** 20;
+    var entry: [20]u8 = @as([20]u8, @splat(0));
     std.mem.writeInt(u32, entry[8..12], 0xFFFF_FFFF, .big);
     std.mem.writeInt(u32, entry[12..16], 0xFFFF_FFFE, .big);
 
@@ -627,7 +627,7 @@ test "hostSliceOffset finds this arch's slice in a fat file and nothing in a thi
     std.mem.writeInt(u32, fat[16..20], 0x4000, .big);
     std.mem.writeInt(i32, fat[28..32], macho.CPU_TYPE_ARM64, .big);
     std.mem.writeInt(u32, fat[36..40], 0x8000, .big);
-    const want: u64 = if (@import("builtin").cpu.arch == .aarch64) 0x8000 else 0x4000;
+    const want: u64 = if (@import("builtin").target.cpu.arch == .aarch64) 0x8000 else 0x4000;
     try testing.expectEqual(@as(?u64, want), hostSliceOffset(&fat));
     // An arch table cut short yields nothing rather than a garbage offset.
     try testing.expectEqual(@as(?u64, null), hostSliceOffset(fat[0..20]));
@@ -639,7 +639,7 @@ test "hostSliceOffset refuses a fat64 offset no file position can hold" {
     var fat: [8 + 32]u8 = @splat(0);
     std.mem.writeInt(u32, fat[0..4], macho.FAT_MAGIC_64, .big);
     std.mem.writeInt(u32, fat[4..8], 1, .big);
-    const host: macho.cpu_type_t = if (@import("builtin").cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
+    const host: macho.cpu_type_t = if (@import("builtin").target.cpu.arch == .aarch64) macho.CPU_TYPE_ARM64 else macho.CPU_TYPE_X86_64;
     std.mem.writeInt(i32, fat[8..12], host, .big);
     std.mem.writeInt(u64, fat[16..24], 1 << 63, .big);
     try testing.expectEqual(@as(?u64, null), hostSliceOffset(&fat));

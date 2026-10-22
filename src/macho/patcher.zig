@@ -136,7 +136,7 @@ pub fn patchPathsCollecting(
         // distinct prefixes onto one target. Keep the first occurrence of
         // each final value; queue any later collider for `-delete_rpath`.
         // Scoped to LC_RPATH — duplicate LC_LOAD_DYLIB is legal.
-        if (lcp.cmd == @intFromEnum(std.macho.LC.RPATH)) {
+        if (lcp.cmd == @backingInt(std.macho.LC.RPATH)) {
             var final_buf: [1024]u8 = undefined;
             if (rpathFinalValue(&final_buf, lcp.path, r_opt)) |final| {
                 var seen = false;
@@ -261,7 +261,7 @@ fn patchCstringRegion(
 
     var i: usize = 0;
     while (i < blob.len) {
-        const nul = std.mem.indexOfScalarPos(u8, blob, i, 0) orelse break;
+        const nul = std.mem.findScalarPos(u8, blob, i, 0) orelse break;
         if (nul != i) {
             switch (rewriteCstringSlot(blob[i..nul], replacements)) {
                 .patched => counts.patched += 1,
@@ -471,8 +471,8 @@ const InstallNameToolForm = enum { change, rpath, id };
 fn installNameToolForm(cmd: u32) InstallNameToolForm {
     const lc = std.macho.LC;
     return switch (cmd) {
-        @intFromEnum(lc.ID_DYLIB) => .id,
-        @intFromEnum(lc.RPATH) => .rpath,
+        @backingInt(lc.ID_DYLIB) => .id,
+        @backingInt(lc.RPATH) => .rpath,
         // LOAD_DYLIB / LOAD_WEAK_DYLIB / LAZY_LOAD_DYLIB / REEXPORT_DYLIB
         // all use `-change`. Default to `-change` for any other dylib-ish
         // load command rather than refusing the flush.
@@ -498,9 +498,9 @@ fn reportInstallNameToolFailure(io: std.Io, file_path: []const u8, stderr_bytes:
 }
 
 pub fn classifyInstallNameToolStderr(stderr: []const u8) FallbackError {
-    if (std.mem.indexOf(u8, stderr, "larger updated load commands do not fit") != null)
+    if (std.mem.find(u8, stderr, "larger updated load commands do not fit") != null)
         return FallbackError.InsufficientHeaderPad;
-    if (std.mem.indexOf(u8, stderr, "no room for new load commands") != null)
+    if (std.mem.find(u8, stderr, "no room for new load commands") != null)
         return FallbackError.InsufficientHeaderPad;
     return FallbackError.InstallNameToolFailed;
 }
@@ -592,7 +592,7 @@ const StderrCapture = struct {
     io: std.Io,
 
     fn start(alloc: std.mem.Allocator, io: std.Io) !StderrCapture {
-        const path = try std.fmt.allocPrintSentinel(alloc, "/tmp/malt_patcher_err_{d}", .{std.c.getpid()}, 0);
+        const path = try alloc.printSentinel("/tmp/malt_patcher_err_{d}", .{std.c.getpid()}, 0);
         const saved = std.c.dup(std.c.STDERR_FILENO);
         const cap = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
         if (saved < 0 or cap < 0) return error.CaptureFailed;
@@ -619,7 +619,7 @@ test "buildInstallNameToolArgv emits one -id for a fat binary" {
     // yields one LC_ID_DYLIB per slice. install_name_tool refuses a second
     // -id, and one covers all slices anyway.
     const a = std.testing.allocator;
-    const id_cmd = @intFromEnum(std.macho.LC.ID_DYLIB);
+    const id_cmd = @backingInt(std.macho.LC.ID_DYLIB);
     const entries = [_]OverflowEntry{
         .{ .cmd = id_cmd, .old_path = "/old/lib.dylib", .new_path = "/new/lib.dylib" },
         .{ .cmd = id_cmd, .old_path = "/old/lib.dylib", .new_path = "/new/lib.dylib" },
@@ -638,7 +638,7 @@ test "buildInstallNameToolArgv emits one -id for a fat binary" {
 test "a relocation failure names the binary even when the tool says nothing" {
     // The promise is that a failure is never silent. A tool that exits
     // non-zero without a word must still leave the user something to act on.
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -650,13 +650,13 @@ test "a relocation failure names the binary even when the tool says nothing" {
     reportInstallNameToolFailure(io, "/some/keg/lib/thing.dylib", "");
     const emitted = try cap.finish(a);
 
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "/some/keg/lib/thing.dylib") != null);
+    try std.testing.expect(std.mem.find(u8, emitted, "/some/keg/lib/thing.dylib") != null);
 }
 
 test "a relocation report ends in a newline whether or not the tool supplied one" {
     // The message is replayed verbatim, so an unterminated one would run into
     // whatever the installer prints next.
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -676,7 +676,7 @@ test "a relocation report ends in a newline whether or not the tool supplied one
 test "flushOverflow stays silent when install_name_tool succeeds" {
     // Nothing to report on success: a spurious line here would make every
     // ordinary install look like it had a problem.
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -696,10 +696,10 @@ test "buildInstallNameToolArgv renders each load-command form" {
     const a = std.testing.allocator;
     const lc = std.macho.LC;
     const entries = [_]OverflowEntry{
-        .{ .cmd = @intFromEnum(lc.LOAD_DYLIB), .old_path = "/old/dep", .new_path = "/new/dep" },
-        .{ .cmd = @intFromEnum(lc.RPATH), .old_path = "/old/rp", .new_path = "/new/rp" },
-        .{ .cmd = @intFromEnum(lc.RPATH), .old_path = "/dup/rp", .new_path = "", .delete = true },
-        .{ .cmd = @intFromEnum(lc.ID_DYLIB), .old_path = "/old/id", .new_path = "/new/id" },
+        .{ .cmd = @backingInt(lc.LOAD_DYLIB), .old_path = "/old/dep", .new_path = "/new/dep" },
+        .{ .cmd = @backingInt(lc.RPATH), .old_path = "/old/rp", .new_path = "/new/rp" },
+        .{ .cmd = @backingInt(lc.RPATH), .old_path = "/dup/rp", .new_path = "", .delete = true },
+        .{ .cmd = @backingInt(lc.ID_DYLIB), .old_path = "/old/id", .new_path = "/new/id" },
     };
     const argv = try buildInstallNameToolArgv(a, "/keg/thing.dylib", &entries);
     defer a.free(argv);
@@ -723,9 +723,10 @@ test "buildInstallNameToolArgv renders each load-command form" {
 }
 
 test "buildInstallNameToolArgv reports allocation failure rather than a partial argv" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    // Also fail the in-place shrink, so `toOwnedSlice` must allocate.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1, .resize_fail_index = 0 });
     const entries = [_]OverflowEntry{
-        .{ .cmd = @intFromEnum(std.macho.LC.ID_DYLIB), .old_path = "/o", .new_path = "/n" },
+        .{ .cmd = @backingInt(std.macho.LC.ID_DYLIB), .old_path = "/o", .new_path = "/n" },
     };
     try std.testing.expectError(
         error.OutOfMemory,
@@ -736,7 +737,7 @@ test "buildInstallNameToolArgv reports allocation failure rather than a partial 
 test "a child that dies by signal is reported, not silently tolerated" {
     // A killed rename tool leaves the binary half-rewritten, so it must fail
     // loudly like any other bad outcome.
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -744,7 +745,7 @@ test "a child that dies by signal is reported, not silently tolerated" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const path = try std.fmt.allocPrintSentinel(a, "/tmp/malt_patcher_signal_{d}", .{std.c.getpid()}, 0);
+    const path = try a.printSentinel("/tmp/malt_patcher_signal_{d}", .{std.c.getpid()}, 0);
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     {
         const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
@@ -758,13 +759,13 @@ test "a child that dies by signal is reported, not silently tolerated" {
     const emitted = try cap.finish(a);
 
     try std.testing.expectError(FallbackError.InstallNameToolFailed, res);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, path) != null);
+    try std.testing.expect(std.mem.find(u8, emitted, path) != null);
 }
 
 // A stderr read that overruns the cap still leaves a child to reap; returning
 // past both `wait` and `kill` strands it as a zombie for the rest of the run.
 test "flushOverflow reaps the child when install_name_tool's stderr overruns the cap" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -772,7 +773,7 @@ test "flushOverflow reaps the child when install_name_tool's stderr overruns the
     defer arena.deinit();
     const a = arena.allocator();
 
-    const path = try std.fmt.allocPrintSentinel(a, "/tmp/malt_patcher_overrun_{d}", .{std.c.getpid()}, 0);
+    const path = try a.printSentinel("/tmp/malt_patcher_overrun_{d}", .{std.c.getpid()}, 0);
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     {
         const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
@@ -813,7 +814,7 @@ test "classifyInstallNameToolStderr keeps padding exhaustion distinct" {
 test "flushOverflow reports why install_name_tool refused the binary" {
     // Without this the caller only sees a generic patch failure, and the one
     // thing that says what went wrong has already been thrown away.
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -821,7 +822,7 @@ test "flushOverflow reports why install_name_tool refused the binary" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const path = try std.fmt.allocPrintSentinel(a, "/tmp/malt_patcher_notmacho_{d}", .{std.c.getpid()}, 0);
+    const path = try a.printSentinel("/tmp/malt_patcher_notmacho_{d}", .{std.c.getpid()}, 0);
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     {
         const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
@@ -835,7 +836,7 @@ test "flushOverflow reports why install_name_tool refused the binary" {
     const emitted = try cap.finish(a);
 
     try std.testing.expectError(FallbackError.InstallNameToolFailed, res);
-    try std.testing.expect(std.mem.indexOf(u8, emitted, "not a Mach-O file") != null);
+    try std.testing.expect(std.mem.find(u8, emitted, "not a Mach-O file") != null);
 }
 
 test "flushOverflow does not execute a prefix-resident install_name_tool shim" {
@@ -843,22 +844,22 @@ test "flushOverflow does not execute a prefix-resident install_name_tool shim" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const root = try std.fmt.allocPrintSentinel(a, "/tmp/malt_install_name_tool_shim_{d}", .{std.c.getpid()}, 0);
+    const root = try a.printSentinel("/tmp/malt_install_name_tool_shim_{d}", .{std.c.getpid()}, 0);
     std.Io.Dir.cwd().deleteTree(io, root) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    const bin = try std.fmt.allocPrint(a, "{s}/bin", .{root});
-    const shim = try std.fmt.allocPrint(a, "{s}/{s}", .{ bin, external_tool_name });
+    const bin = try a.print("{s}/bin", .{root});
+    const shim = try a.print("{s}/{s}", .{ bin, external_tool_name });
     try std.Io.Dir.cwd().createDirPath(io, bin);
     try std.Io.Dir.symLinkAbsolute(io, "/usr/bin/true", shim, .{});
 
-    const path_entry = try std.fmt.allocPrintSentinel(a, "PATH={s}:/usr/bin:/bin", .{bin}, 0);
+    const path_entry = try a.printSentinel("PATH={s}:/usr/bin:/bin", .{bin}, 0);
     const entries = [_:null]?[*:0]const u8{path_entry.ptr};
     const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = environ });
     defer threaded.deinit();
 
     const entries_to_flush = [_]OverflowEntry{.{
-        .cmd = @intFromEnum(std.macho.LC.LOAD_DYLIB),
+        .cmd = @backingInt(std.macho.LC.LOAD_DYLIB),
         .old_path = "/usr/local/lib/libx.dylib",
         .new_path = "/opt/malt/lib/libx.dylib",
     }};
@@ -898,8 +899,8 @@ pub fn patchTextFiles(
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
 
-        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const abs_path = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
+        var abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const abs_path = std.mem.print(&abs_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
         if (patchTextFile(io, allocator, abs_path, replacements)) count += 1;
     }
 
@@ -1039,10 +1040,10 @@ pub fn fileLinksPath(io: std.Io, allocator: std.mem.Allocator, file_path: []cons
 
     for (macho.paths) |p| {
         switch (p.cmd) {
-            @intFromEnum(std.macho.LC.LOAD_DYLIB),
-            @intFromEnum(std.macho.LC.LOAD_WEAK_DYLIB),
-            @intFromEnum(std.macho.LC.REEXPORT_DYLIB),
-            => if (std.mem.indexOf(u8, p.path, needle) != null) return true,
+            @backingInt(std.macho.LC.LOAD_DYLIB),
+            @backingInt(std.macho.LC.LOAD_WEAK_DYLIB),
+            @backingInt(std.macho.LC.REEXPORT_DYLIB),
+            => if (std.mem.find(u8, p.path, needle) != null) return true,
             else => {},
         }
     }
@@ -1099,10 +1100,10 @@ pub fn verifyFile(io: std.Io, allocator: std.mem.Allocator, file_path: []const u
     var macho = parser.parse(allocator, data) catch return;
     defer macho.deinit();
 
-    const rpath_cmd = @intFromEnum(std.macho.LC.RPATH);
+    const rpath_cmd = @backingInt(std.macho.LC.RPATH);
     for (macho.paths, 0..) |p, i| {
         for (relocation_placeholders) |token| {
-            if (std.mem.indexOf(u8, p.path, token) != null)
+            if (std.mem.find(u8, p.path, token) != null)
                 return VerifyError.UnsubstitutedPlaceholder;
         }
 
@@ -1149,8 +1150,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const raw = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const raw = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -1159,18 +1159,17 @@ const Scratch = struct {
         try std.Io.Dir.cwd().createDirPath(fs_test_io, raw);
         // /tmp is a symlink to /private/tmp on macOS; resolve once so paths the
         // code under test returns compare equal to `base`.
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var d = try std.Io.Dir.cwd().openDir(fs_test_io, raw, .{});
         errdefer d.close(fs_test_io);
         const n = try std.Io.Dir.realPath(d, fs_test_io, &buf);
-        const base = try arena.allocator().dupeZ(u8, buf[0..n]);
+        const base = try arena.allocator().dupeSentinel(u8, buf[0..n], 0);
         return .{ .arena = arena, .base = base, .dir = d };
     }
 
     /// Absolute path to `sub` (leading slash included); valid until deinit.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -1252,7 +1251,7 @@ test "patchPathsCollecting dedups an LC_RPATH that relocation collapses onto a k
     try testing.expectEqual(@as(u32, 1), outcome.patched_count);
     try testing.expectEqual(@as(usize, 1), outcome.overflow.len);
     try testing.expect(outcome.overflow[0].delete);
-    try testing.expectEqual(@intFromEnum(std.macho.LC.RPATH), outcome.overflow[0].cmd);
+    try testing.expectEqual(@backingInt(std.macho.LC.RPATH), outcome.overflow[0].cmd);
     try testing.expectEqualStrings("/usr/local/lib", outcome.overflow[0].old_path);
 }
 
@@ -1486,7 +1485,7 @@ fn buildSignedDylibMachO(allocator: std.mem.Allocator, dylib_path: []const u8, c
 
 /// Rewrite the build prefix in place without re-signing.
 fn relocateUnsigned(bytes: []u8) void {
-    const slot = std.mem.indexOf(u8, bytes, "/opt/homebrew").?;
+    const slot = std.mem.find(u8, bytes, "/opt/homebrew").?;
     @memcpy(bytes[slot..][0.."/opt/malt".len], "/opt/malt");
 }
 

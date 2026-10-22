@@ -55,7 +55,7 @@ fn bottleErrorFromGhcr(e: ghcr_mod.GhcrError) BottleError {
 /// Formats `<dest_dir>/bottle.tar.gz` into `buf`; distinguishes path overflow
 /// from allocation failure so callers can surface a precise message.
 pub fn buildTmpArchivePath(buf: []u8, dest_dir: []const u8) BottleError![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/bottle.tar.gz", .{dest_dir}) catch
+    return std.mem.print(buf, "{s}/bottle.tar.gz", .{dest_dir}) catch
         return BottleError.PathTooLong;
 }
 
@@ -250,8 +250,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -263,8 +262,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -306,7 +304,7 @@ test "verify returns false for a mismatching sha256" {
     try f.writeStreamingAll(io, "hello");
     f.close(io);
 
-    try testing.expect(!try verify(io, path, "00" ** 32));
+    try testing.expect(!try verify(io, path, std.mem.asBytes(&@as([32][2]u8, @splat("00".*)))));
 }
 
 test "verify returns false when the file does not exist" {
@@ -314,7 +312,7 @@ test "verify returns false when the file does not exist" {
     // Unique base too: a concurrent run could otherwise create this path.
     var s = try Scratch.init("bottle_verify_missing_xyz");
     defer s.deinit();
-    try testing.expect(!try verify(std.Options.debug_io, s.base, "00" ** 32));
+    try testing.expect(!try verify(std.Options.debug_io, s.base, std.mem.asBytes(&@as([32][2]u8, @splat("00".*)))));
 }
 
 test "verify rejects mismatches in any position (constant-time-equivalent)" {
@@ -354,7 +352,7 @@ test "verify rejects expected_sha256 of wrong length" {
     f.close(io);
 
     try testing.expect(!try verify(io, path, "2c"));
-    try testing.expect(!try verify(io, path, "00" ** 32 ++ "00"));
+    try testing.expect(!try verify(io, path, std.mem.asBytes(&@as([32][2]u8, @splat("00".*))) ++ "00"));
 }
 
 test "verify hashes payloads larger than the streaming chunk without buffering" {
@@ -390,7 +388,7 @@ test "verify hashes payloads larger than the streaming chunk without buffering" 
 
 test "buildTmpArchivePath returns PathTooLong for an oversized dest_dir" {
     var buf: [512]u8 = undefined;
-    const long_dest = "/" ++ ("a" ** 499);
+    const long_dest = "/" ++ (&@as([499]u8, @splat('a')));
     try std.testing.expectError(BottleError.PathTooLong, buildTmpArchivePath(&buf, long_dest));
 }
 
@@ -453,7 +451,7 @@ test "checkStreamedSha tolerates empty and oversized expected without crashing" 
     try std.testing.expectEqual(@as(u64, 1), empty_info.body_len);
     for (empty_info.expected) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 
-    const long_info = checkStreamedSha("b" ** 128, computed, 1) orelse return error.TestUnexpectedNull;
+    const long_info = checkStreamedSha(&@as([128]u8, @splat('b')), computed, 1) orelse return error.TestUnexpectedNull;
     for (long_info.expected) |byte| try std.testing.expectEqual(@as(u8, 'b'), byte);
 }
 
@@ -538,7 +536,7 @@ test "checkStreamedSha NUL-pads a shorter-than-64 expected in the echo" {
     // branch the empty (n=0) and oversized (n=64) cases don't reach.
     var computed: [64]u8 = undefined;
     @memset(&computed, 'a');
-    const short = "c" ** 32;
+    const short = &@as([32]u8, @splat('c'));
     const info = checkStreamedSha(short, computed, 7) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqual(@as(u64, 7), info.body_len);
     try std.testing.expectEqualStrings(short, info.expected[0..32]);

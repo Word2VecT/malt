@@ -23,11 +23,11 @@ const TempDb = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const base = try test_io.uniqueTempPath(arena.allocator(), "services", tag);
-        const dir = try arena.allocator().dupeZ(u8, base);
+        const dir = try arena.allocator().dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -36,8 +36,7 @@ const TempDb = struct {
 
     /// Absolute path to `sub` inside the scratch dir; valid until `deinit`.
     fn p(self: *TempDb, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.dir, sub },
             0,

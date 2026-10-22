@@ -27,7 +27,7 @@ const libc_env = struct {
 /// replaced for `restorePrefixEnv`. Tests must restore rather than unset:
 /// later tests need the harness value, not the shared test fallback.
 pub fn overridePrefixEnv(prefix: [:0]const u8) !?[:0]u8 {
-    const prev: ?[:0]u8 = if (getenvLocal("MALT_PREFIX")) |v| try std.heap.c_allocator.dupeZ(u8, v) else null;
+    const prev: ?[:0]u8 = if (getenvLocal("MALT_PREFIX")) |v| try std.heap.c_allocator.dupeSentinel(u8, v, 0) else null;
     _ = libc_env.setenv("MALT_PREFIX", prefix.ptr, 1);
     return prev;
 }
@@ -80,7 +80,7 @@ fn refuseEnv(name: []const u8, e: prefix_path.PrefixError) noreturn {
     const raw = getenvLocal(name) orelse "<unset>";
     // Bypass the UI layer — atomic.zig sits below it in the dep graph.
     var buf: [1024]u8 = undefined;
-    const msg = std.fmt.bufPrint(
+    const msg = std.mem.print(
         &buf,
         "malt: refusing to use {s}='{s}': {s}\n",
         .{ name, raw, prefix_path.describePrefixError(e) },
@@ -184,8 +184,8 @@ fn atomicWriteFileImpl(
     std.c.arc4random_buf(&rand_bytes, rand_bytes.len);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
 
-    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.{s}.tmp", .{ dst_path, &hex }) catch
+    var tmp_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tmp_path = std.mem.print(&tmp_buf, "{s}.{s}.tmp", .{ dst_path, &hex }) catch
         return error.NameTooLong;
 
     {
@@ -209,7 +209,7 @@ fn atomicWriteFileImpl(
     }
 
     // fsync the parent dir so the renamed dirent itself survives a kernel crash.
-    const parent = std.fs.path.dirname(dst_path) orelse "/";
+    const parent = std.Io.Dir.path.dirname(dst_path) orelse "/";
     var parent_dir = try std.Io.Dir.openDirAbsolute(io, parent, .{});
     defer parent_dir.close(io);
     try sync_ops.syncDir(io, parent_dir);
@@ -223,7 +223,7 @@ pub fn createTempDir(io: std.Io, allocator: std.mem.Allocator, label: []const u8
 
     // Ensure the tmp base directory exists. If makePath fails, makeDirAbsolute
     // below surfaces the real error on the final dir.
-    const tmp_base = try std.fmt.allocPrint(allocator, "{s}/tmp", .{prefix});
+    const tmp_base = try allocator.print("{s}/tmp", .{prefix});
     defer allocator.free(tmp_base);
     std.Io.Dir.cwd().createDirPath(io, tmp_base) catch {};
 
@@ -232,7 +232,7 @@ pub fn createTempDir(io: std.Io, allocator: std.mem.Allocator, label: []const u8
     std.c.arc4random_buf(&rand_bytes, rand_bytes.len);
     const hex_buf = std.fmt.bytesToHex(rand_bytes, .lower);
 
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/tmp/{s}_{s}", .{ prefix, label, &hex_buf });
+    const dir_path = try allocator.print("{s}/tmp/{s}_{s}", .{ prefix, label, &hex_buf });
 
     std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {}, // unlikely but harmless
@@ -252,12 +252,12 @@ pub fn cleanupTempDir(io: std.Io, dir_path: []const u8) void {
 
 /// Return "{prefix}/tmp", allocated via `allocator`.
 pub fn maltTmpDir(allocator: std.mem.Allocator) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/tmp", .{maltPrefixOrAbort()});
+    return allocator.print("{s}/tmp", .{maltPrefixOrAbort()});
 }
 
 /// Return "{prefix}/db", allocated via `allocator`.
 pub fn maltDbDir(allocator: std.mem.Allocator) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/db", .{maltPrefixOrAbort()});
+    return allocator.print("{s}/db", .{maltPrefixOrAbort()});
 }
 
 /// Validated form of `maltCacheDir`: MALT_CACHE is checked at the env
@@ -269,7 +269,7 @@ pub fn maltCacheDirChecked(allocator: std.mem.Allocator) (prefix_path.PrefixErro
         try prefix_path.validateShape(cache);
         if (testHonoursCache(cache)) return allocator.dupe(u8, cache);
     }
-    return std.fmt.allocPrint(allocator, "{s}/cache", .{try maltPrefixChecked()});
+    return allocator.print("{s}/cache", .{try maltPrefixChecked()});
 }
 
 /// Return the cache directory, honouring MALT_CACHE env var.
@@ -280,7 +280,7 @@ pub fn maltCacheDir(allocator: std.mem.Allocator) ![]const u8 {
         prefix_path.validateShape(cache) catch |e| refuseEnv("MALT_CACHE", e);
         if (testHonoursCache(cache)) return allocator.dupe(u8, cache);
     }
-    return std.fmt.allocPrint(allocator, "{s}/cache", .{maltPrefixOrAbort()});
+    return allocator.print("{s}/cache", .{maltPrefixOrAbort()});
 }
 
 // Inline tests for the atomicWriteFileImpl durability seam.
@@ -310,8 +310,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -324,8 +323,7 @@ const Scratch = struct {
     /// Absolute path to `sub` (leading slash included) inside the scratch
     /// tree; valid until `deinit`.
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}{s}",
             .{ self.base, sub },
             0,
@@ -368,12 +366,12 @@ test "an exact-mode atomic write survives a restrictive umask" {
     defer _ = std.c.umask(prev);
 
     const path = s.p("/bundle.pem");
-    try atomicWriteFileMode(io, path, "data", @enumFromInt(0o644));
+    try atomicWriteFileMode(io, path, "data", @fromBackingInt(@intCast(0o644)));
 
     const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
     defer f.close(io);
     const st = try f.stat(io);
-    try std.testing.expectEqual(@as(u32, 0o644), @intFromEnum(st.permissions) & 0o777);
+    try std.testing.expectEqual(@as(u32, 0o644), @backingInt(st.permissions) & 0o777);
 }
 
 test "a default-mode atomic write still honours the umask" {
@@ -391,7 +389,7 @@ test "a default-mode atomic write still honours the umask" {
     defer f.close(io);
     const st = try f.stat(io);
     // Widening this for every caller would be a security change, not a fix.
-    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(st.permissions) & 0o077);
+    try std.testing.expectEqual(@as(u32, 0), @backingInt(st.permissions) & 0o077);
 }
 
 test "atomicWriteFileImpl fsyncs the tempfile via the injected sync ops" {

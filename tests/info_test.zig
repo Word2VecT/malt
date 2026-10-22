@@ -27,7 +27,7 @@ const Fixture = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
         const base = try test_io.uniqueTempPath(arena.allocator(), "info", tag);
-        const base_z = try arena.allocator().dupeZ(u8, base);
+        const base_z = try arena.allocator().dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, base_z) catch {};
         try test_io.cwd().createDirPath(std.Options.debug_io, base_z);
         return .{ .arena = arena, .base = base_z };
@@ -35,8 +35,7 @@ const Fixture = struct {
 
     /// Absolute path to `sub` inside the fixture; valid until `deinit`.
     fn p(self: *Fixture, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(
-            self.arena.allocator(),
+        return self.arena.allocator().printSentinel(
             "{s}/{s}",
             .{ self.base, sub },
             0,
@@ -85,7 +84,7 @@ fn expectRefused(prefix: []const u8) !void {
     output.beginStderrCapture(testing.allocator, &err_buf);
     defer output.endStderrCapture();
     try testing.expectError(error.Aborted, info.openInstallDb(std.Options.debug_io, prefix));
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "could not open the install database") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "could not open the install database") != null);
 }
 
 test "openInstallDb reads a prefix with no db/ directory as empty" {
@@ -108,7 +107,7 @@ test "openInstallDb refuses a file that exists but is not a database" {
     try test_io.makeDirAbsolute(std.Options.debug_io, fx.p("db"));
     const f = try test_io.createFileAbsolute(std.Options.debug_io, fx.p("db/malt.db"), .{ .truncate = true });
     defer f.close(std.Options.debug_io);
-    try f.writeStreamingAll(std.Options.debug_io, "not a sqlite database, just garbage bytes" ** 4);
+    try f.writeStreamingAll(std.Options.debug_io, std.mem.asBytes(&@as([4][41]u8, @splat("not a sqlite database, just garbage bytes".*))));
     try expectRefused(fx.base);
 }
 
@@ -150,13 +149,13 @@ test "openInstallDb refuses a prefix that is a file" {
 test "openInstallDb refuses a prefix too long to hold the database path" {
     // Silently reading an unbuildable path as "no db/" would hide every
     // install under it.
-    const long_prefix = "/" ++ "p" ** malt.prefix_path.path_buf_len;
+    const long_prefix = "/" ++ &@as([malt.prefix_path.path_buf_len]u8, @splat('p'));
     var err_buf: std.ArrayList(u8) = .empty;
     defer err_buf.deinit(testing.allocator);
     output.beginStderrCapture(testing.allocator, &err_buf);
     defer output.endStderrCapture();
     try testing.expectError(error.Aborted, info.openInstallDb(std.Options.debug_io, long_prefix));
-    try testing.expect(std.mem.indexOf(u8, err_buf.items, "install database") != null);
+    try testing.expect(std.mem.find(u8, err_buf.items, "install database") != null);
 }
 
 // --- collectInstalledDeps: DB-backed dependency read --------------------
@@ -309,9 +308,9 @@ const Prefix = struct {
     fn init(allocator: std.mem.Allocator, tag: []const u8) !Prefix {
         const base = try test_io.uniqueTempPath(allocator, "info_dispatch", tag);
         defer allocator.free(base);
-        const path = try allocator.dupeZ(u8, base);
+        const path = try allocator.dupeSentinel(u8, base, 0);
         test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
-        const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{path});
+        const db_dir = try allocator.print("{s}/db", .{path});
         defer allocator.free(db_dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
         _ = c.setenv("MALT_PREFIX", path.ptr, 1);
@@ -330,11 +329,11 @@ const Prefix = struct {
     fn seedNotFound(self: *Prefix, name: []const u8) !void {
         const io = std.Options.debug_io;
         var dir_buf: [512]u8 = undefined;
-        const dir = try std.fmt.bufPrint(&dir_buf, "{s}/cache/api", .{self.path});
+        const dir = try std.mem.print(&dir_buf, "{s}/cache/api", .{self.path});
         try test_io.cwd().createDirPath(io, dir);
         for ([_][]const u8{ "formula_", "cask_" }) |kind| {
             var path_buf: [512]u8 = undefined;
-            const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}{s}.404", .{ dir, kind, name });
+            const path = try std.mem.print(&path_buf, "{s}/{s}{s}.404", .{ dir, kind, name });
             const f = try test_io.createFileAbsolute(io, path, .{ .truncate = true });
             f.close(io);
         }
@@ -368,7 +367,7 @@ const Prefix = struct {
 
     fn openSeedDb(self: *Prefix) !sqlite.Database {
         var db_path_buf: [512]u8 = undefined;
-        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{self.path}, 0);
+        const db_path = try std.mem.printSentinel(&db_path_buf, "{s}/db/malt.db", .{self.path}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -386,7 +385,7 @@ fn captureInfo(allocator: std.mem.Allocator, args: []const []const u8, tag: []co
 
     const cap_base = try test_io.uniqueTempPath(allocator, "info_cap", tag);
     defer allocator.free(cap_base);
-    const cap_path = try allocator.dupeZ(u8, cap_base);
+    const cap_path = try allocator.dupeSentinel(u8, cap_base, 0);
     defer allocator.free(cap_path);
     defer test_io.deleteFileAbsolute(std.Options.debug_io, cap_path) catch {};
 
@@ -435,7 +434,7 @@ test "info --cask --formula shows the installed formula, not 'not installed'" {
     const out = try captureInfo(testing.allocator, &.{ "--cask", "--formula", "wget" }, "both_human");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "not installed") == null);
+    try testing.expect(std.mem.find(u8, out, "not installed") == null);
     try testing.expectStringStartsWith(out, "wget: ");
 }
 
@@ -452,7 +451,7 @@ test "info --cask --formula --json pins installed:true for an installed package"
     const out = try captureInfo(testing.allocator, &.{ "--cask", "--formula", "wget" }, "both_json");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "\"installed\":true") != null);
+    try testing.expect(std.mem.find(u8, out, "\"installed\":true") != null);
 }
 
 test "info --formula still narrows to the installed formula" {
@@ -485,9 +484,9 @@ test "info --cask --formula resolves an installed cask (formula misses, cask run
     const out = try captureInfo(testing.allocator, &.{ "--cask", "--formula", "firefox" }, "both_cask");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "not installed") == null);
+    try testing.expect(std.mem.find(u8, out, "not installed") == null);
     try testing.expectStringStartsWith(out, "firefox: ");
-    try testing.expect(std.mem.indexOf(u8, out, "(cask)") != null);
+    try testing.expect(std.mem.find(u8, out, "(cask)") != null);
 }
 
 test "info --cask still skips the formula branch for an installed formula" {
@@ -505,7 +504,7 @@ test "info --cask still skips the formula branch for an installed formula" {
     const out = try captureInfo(testing.allocator, &.{ "--cask", "wget" }, "cask_only_excludes_formula");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "not installed") != null);
+    try testing.expect(std.mem.find(u8, out, "not installed") != null);
 }
 
 test "info --cask --formula on an absent token still reaches not-found" {
@@ -523,7 +522,7 @@ test "info --cask --formula on an absent token still reaches not-found" {
     const out = try captureInfo(testing.allocator, &.{ "--cask", "--formula", "ghost-pkg-xyz" }, "both_absent");
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "not installed") != null);
+    try testing.expect(std.mem.find(u8, out, "not installed") != null);
 }
 
 test "info --json on an absent token reports the kind the caller selected" {
@@ -539,11 +538,11 @@ test "info --json on an absent token reports the kind the caller selected" {
 
     const cask_out = try captureInfo(testing.allocator, &.{ "--cask", "ghost-pkg-xyz" }, "absent_json_cask");
     defer testing.allocator.free(cask_out);
-    try testing.expect(std.mem.indexOf(u8, cask_out, "\"type\":\"cask\",\"installed\":false}") != null);
+    try testing.expect(std.mem.find(u8, cask_out, "\"type\":\"cask\",\"installed\":false}") != null);
 
     const formula_out = try captureInfo(testing.allocator, &.{ "--formula", "ghost-pkg-xyz" }, "absent_json_formula");
     defer testing.allocator.free(formula_out);
-    try testing.expect(std.mem.indexOf(u8, formula_out, "\"type\":\"formula\",\"installed\":false}") != null);
+    try testing.expect(std.mem.find(u8, formula_out, "\"type\":\"formula\",\"installed\":false}") != null);
 }
 
 test "info --cask and --formula each return their own side of a name installed as both" {
@@ -560,9 +559,9 @@ test "info --cask and --formula each return their own side of a name installed a
 
     const cask_out = try captureInfo(testing.allocator, &.{ "--cask", "box" }, "shared_name_cask");
     defer testing.allocator.free(cask_out);
-    try testing.expect(std.mem.indexOf(u8, cask_out, "\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\"") != null);
+    try testing.expect(std.mem.find(u8, cask_out, "\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\"") != null);
 
     const formula_out = try captureInfo(testing.allocator, &.{ "--formula", "box" }, "shared_name_formula");
     defer testing.allocator.free(formula_out);
-    try testing.expect(std.mem.indexOf(u8, formula_out, "\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"") != null);
+    try testing.expect(std.mem.find(u8, formula_out, "\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"") != null);
 }

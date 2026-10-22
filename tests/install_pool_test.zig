@@ -19,11 +19,11 @@ const test_io = @import("test_io");
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const base = try test_io.uniqueTempPath(testing.allocator, "installpool", suffix);
     defer testing.allocator.free(base);
-    const path = try testing.allocator.dupeZ(u8, base);
+    const path = try testing.allocator.dupeSentinel(u8, base, 0);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, path);
     inline for (.{ "store", "Cellar" }) |sub| {
-        const dir = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ path, sub });
+        const dir = try testing.allocator.print("{s}/{s}", .{ path, sub });
         defer testing.allocator.free(dir);
         try test_io.cwd().createDirPath(std.Options.debug_io, dir);
     }
@@ -36,14 +36,13 @@ fn seedWarmStore(
     name: []const u8,
     version: []const u8,
 ) !void {
-    const inner = try std.fmt.allocPrint(
-        testing.allocator,
+    const inner = try testing.allocator.print(
         "{s}/store/{s}/{s}/{s}",
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(inner);
     try test_io.cwd().createDirPath(std.Options.debug_io, inner);
-    const readme = try std.fmt.allocPrint(testing.allocator, "{s}/README", .{inner});
+    const readme = try testing.allocator.print("{s}/README", .{inner});
     defer testing.allocator.free(readme);
     const f = try test_io.cwd().createFile(std.Options.debug_io, readme, .{});
     defer f.close(std.Options.debug_io);
@@ -56,7 +55,7 @@ fn anyPlatformFormulaJson(
     version: []const u8,
     sha: []const u8,
 ) ![]const u8 {
-    return std.fmt.allocPrint(arena,
+    return arena.print(
         \\{{
         \\  "name": "{s}",
         \\  "full_name": "{s}",
@@ -101,8 +100,8 @@ test "installPoolWorker drains every job against a warm store and stamps each re
 
     // Two jobs, both warm. The atomic-index loop must hand both out and
     // stop cleanly at the end — no off-by-one, no double-processing.
-    const sha_a = "aaaa" ** 16;
-    const sha_b = "bbbb" ** 16;
+    const sha_a = std.mem.asBytes(&@as([16][4]u8, @splat("aaaa".*)));
+    const sha_b = std.mem.asBytes(&@as([16][4]u8, @splat("bbbb".*)));
     try seedWarmStore(prefix, sha_a, "alpha", "1.0");
     try seedWarmStore(prefix, sha_b, "beta", "2.0");
 
@@ -170,16 +169,16 @@ test "installPoolWorker drains every job against a warm store and stamps each re
 
     // Keg paths match the canonical Cellar/<name>/<version> shape so the
     // serial link phase downstream has a valid path to hand to the linker.
-    const path_a = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/alpha/1.0", .{prefix});
+    const path_a = try testing.allocator.print("{s}/Cellar/alpha/1.0", .{prefix});
     defer testing.allocator.free(path_a);
-    const path_b = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/beta/2.0", .{prefix});
+    const path_b = try testing.allocator.print("{s}/Cellar/beta/2.0", .{prefix});
     defer testing.allocator.free(path_b);
     try testing.expectEqualStrings(path_a, results[0].kegPath());
     try testing.expectEqualStrings(path_b, results[1].kegPath());
 
     // Cellar/<name>/<version>/README — cellar materialise actually wrote
     // the keg, not just stamped the result struct.
-    const readme_a = try std.fmt.allocPrint(testing.allocator, "{s}/README", .{path_a});
+    const readme_a = try testing.allocator.print("{s}/README", .{path_a});
     defer testing.allocator.free(readme_a);
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, readme_a, .{});
 }
@@ -193,9 +192,9 @@ test "installPoolWorker drains a 3-job pool concurrently across two workers" {
     // already claimed by its sibling without re-processing them. The
     // atomic counter handles the handoff; a regression here would
     // double-materialise or skip a slot.
-    const sha_a = "1111" ** 16;
-    const sha_b = "2222" ** 16;
-    const sha_c = "3333" ** 16;
+    const sha_a = std.mem.asBytes(&@as([16][4]u8, @splat("1111".*)));
+    const sha_b = std.mem.asBytes(&@as([16][4]u8, @splat("2222".*)));
+    const sha_c = std.mem.asBytes(&@as([16][4]u8, @splat("3333".*)));
     try seedWarmStore(prefix, sha_a, "one", "1.0");
     try seedWarmStore(prefix, sha_b, "two", "2.0");
     try seedWarmStore(prefix, sha_c, "three", "3.0");
@@ -285,18 +284,17 @@ test "installPoolWorker propagates the specific CellarError variant into result.
     // the resulting CellarError.PathTooLong through `cellar_diag`; the
     // pool worker must forward it into `result.err` instead of falling
     // back to the historical CloneFailed catch-all.
-    const sha = "f00d" ** 16;
-    const store_inner = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, sha });
+    const sha = std.mem.asBytes(&@as([16][4]u8, @splat("f00d".*)));
+    const store_inner = try testing.allocator.print("{s}/store/{s}", .{ prefix, sha });
     defer testing.allocator.free(store_inner);
     try test_io.cwd().createDirPath(std.Options.debug_io, store_inner);
 
-    const long_name = "a" ** 230;
-    const long_ver = "1" ** 230;
+    const long_name = &@as([230]u8, @splat('a'));
+    const long_ver = &@as([230]u8, @splat('1'));
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const formula_json = try std.fmt.allocPrint(
-        arena.allocator(),
+    const formula_json = try arena.allocator().print(
         \\{{
         \\  "name": "{s}",
         \\  "full_name": "{s}",
@@ -372,8 +370,8 @@ test "installPoolWorker bails between jobs when Ctrl-C fires" {
     // user-facing effect: hitting Ctrl-C during a wide dep-graph
     // install stops the pool quickly instead of grinding through every
     // queued keg first.
-    const sha_a = "abab" ** 16;
-    const sha_b = "cdcd" ** 16;
+    const sha_a = std.mem.asBytes(&@as([16][4]u8, @splat("abab".*)));
+    const sha_b = std.mem.asBytes(&@as([16][4]u8, @splat("cdcd".*)));
     try seedWarmStore(prefix, sha_a, "alpha", "1.0");
     try seedWarmStore(prefix, sha_b, "beta", "2.0");
 
@@ -462,7 +460,7 @@ test "installPoolWorker leaves the result untouched and marks job not-succeeded 
     try schema.initSchema(&db);
     var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
 
-    var jobs = [_]malt.install_download.DownloadJob{makeJob("ghost", "0.1", "deadbeef" ** 8)};
+    var jobs = [_]malt.install_download.DownloadJob{makeJob("ghost", "0.1", std.mem.asBytes(&@as([8][8]u8, @splat("deadbeef".*))))};
     var results: [1]malt.install_download.MaterializeResult = .{.{ .ok = false, .err = null }};
 
     var pool: malt.install_download.InstallPool = .{

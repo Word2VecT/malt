@@ -89,7 +89,7 @@ test "MismatchInfo.body_len is the actual byte count, not a clamped value" {
     const big = try alloc.alloc(u8, big_size);
     defer alloc.free(big);
     @memset(big, 0xAB);
-    const wrong = "0" ** 64;
+    const wrong = &@as([64]u8, @splat('0'));
     const info = checkBodySha(wrong, big) orelse return error.TestUnexpectedNull;
     try testing.expectEqual(@as(u64, big_size), info.body_len);
 }
@@ -109,7 +109,7 @@ test "MismatchInfo.computed is independent from MismatchInfo.expected (no aliasi
     // return expected for both") would silently make the diagnostic
     // useless — assert by comparing computed to a known SHA.
     const body = "xyz"; // SHA256 = 3608bca1e44ea6c4d268eb6db02260269892c0b42b86bbf1e77a6fa16c3c9282
-    const wrong = "0" ** 64;
+    const wrong = &@as([64]u8, @splat('0'));
     const info = checkBodySha(wrong, body) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings(
         "3608bca1e44ea6c4d268eb6db02260269892c0b42b86bbf1e77a6fa16c3c9282",
@@ -183,15 +183,15 @@ test "MismatchInfo formats cleanly through the worker's log template" {
     @memcpy(&info.computed, got);
 
     var buf: [4096]u8 = undefined;
-    const line = try std.fmt.bufPrint(
+    const line = try std.mem.print(
         &buf,
         "  zig: Sha256Mismatch (expected={s} got={s} bytes={d})",
         .{ info.expected[0..@min(64, info.expected.len)], info.computed[0..], info.body_len },
     );
 
-    try testing.expect(std.mem.indexOf(u8, line, exp) != null);
-    try testing.expect(std.mem.indexOf(u8, line, got) != null);
-    try testing.expect(std.mem.indexOf(u8, line, "bytes=36308387") != null);
+    try testing.expect(std.mem.find(u8, line, exp) != null);
+    try testing.expect(std.mem.find(u8, line, got) != null);
+    try testing.expect(std.mem.find(u8, line, "bytes=36308387") != null);
     try testing.expect(line.len < 4096);
 }
 
@@ -217,7 +217,7 @@ test "body SHA check and verify agree on the same body's SHA" {
     try testing.expect(try bottle.verify(std.Options.debug_io, path, &sha_hex));
 
     // And both reject the same wrong hash.
-    const wrong = "0" ** 64;
+    const wrong = &@as([64]u8, @splat('0'));
     try testing.expect(checkBodySha(wrong, body) != null);
     try testing.expect(!(try bottle.verify(std.Options.debug_io, path, wrong)));
 }

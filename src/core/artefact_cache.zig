@@ -11,16 +11,16 @@ const std = @import("std");
 pub fn adoptLegacy(io: std.Io, prefix: []const u8, cache_dir: []const u8) void {
     var legacy_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // The pre-override layout, spelled out on purpose: this is its one reader.
-    const legacy_root = std.fmt.bufPrint(&legacy_buf, "{s}/cache", .{prefix}) catch return;
+    const legacy_root = std.mem.print(&legacy_buf, "{s}/cache", .{prefix}) catch return;
     if (sameDir(io, legacy_root, cache_dir)) return;
     inline for (.{ "Cask", "Tap" }) |tier| adoptTier(io, legacy_root, cache_dir, tier);
 }
 
 fn adoptTier(io: std.Io, legacy_root: []const u8, cache_dir: []const u8, tier: []const u8) void {
     var legacy_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const legacy = std.fmt.bufPrint(&legacy_buf, "{s}/{s}", .{ legacy_root, tier }) catch return;
+    const legacy = std.mem.print(&legacy_buf, "{s}/{s}", .{ legacy_root, tier }) catch return;
     var dest_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/{s}", .{ cache_dir, tier }) catch return;
+    const dest = std.mem.print(&dest_buf, "{s}/{s}", .{ cache_dir, tier }) catch return;
 
     var src_dir = std.Io.Dir.openDirAbsolute(io, legacy, .{ .iterate = true }) catch return;
     defer src_dir.close(io);
@@ -29,10 +29,10 @@ fn adoptTier(io: std.Io, legacy_root: []const u8, cache_dir: []const u8, tier: [
     var it = src_dir.iterate();
     while (it.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
-        var from_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const from = std.fmt.bufPrint(&from_buf, "{s}/{s}", .{ legacy, entry.name }) catch continue;
-        var to_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const to = std.fmt.bufPrint(&to_buf, "{s}/{s}", .{ dest, entry.name }) catch continue;
+        var from_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const from = std.mem.print(&from_buf, "{s}/{s}", .{ legacy, entry.name }) catch continue;
+        var to_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const to = std.mem.print(&to_buf, "{s}/{s}", .{ dest, entry.name }) catch continue;
         if (std.Io.Dir.accessAbsolute(io, to, .{})) |_| {
             std.Io.Dir.cwd().deleteFile(io, from) catch {};
         } else |_| {
@@ -51,8 +51,8 @@ fn sameDir(io: std.Io, a_path: []const u8, b_path: []const u8) bool {
     defer a_dir.close(io);
     var b_dir = std.Io.Dir.openDirAbsolute(io, b_path, .{}) catch return false;
     defer b_dir.close(io);
-    var a: [std.fs.max_path_bytes]u8 = undefined;
-    var b: [std.fs.max_path_bytes]u8 = undefined;
+    var a: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var b: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const na = std.Io.Dir.realPath(a_dir, io, &a) catch return false;
     const nb = std.Io.Dir.realPath(b_dir, io, &b) catch return false;
     return std.mem.eql(u8, a[0..na], b[0..nb]);
@@ -85,8 +85,7 @@ const Scratch = struct {
     fn init(comptime tag: []const u8) !Scratch {
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         errdefer arena.deinit();
-        const base = try std.fmt.allocPrintSentinel(
-            arena.allocator(),
+        const base = try arena.allocator().printSentinel(
             "/tmp/malt_" ++ tag ++ "_{d}_{d}",
             .{ std.c.getpid(), scratch_seq.fetchAdd(1, .monotonic) },
             0,
@@ -96,7 +95,7 @@ const Scratch = struct {
     }
 
     fn p(self: *Scratch, sub: []const u8) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(self.arena.allocator(), "{s}{s}", .{ self.base, sub }, 0) catch @panic("OOM");
+        return self.arena.allocator().printSentinel("{s}{s}", .{ self.base, sub }, 0) catch @panic("OOM");
     }
 
     fn deinit(self: *Scratch) void {
@@ -124,7 +123,7 @@ test "adoptLegacy moves both tiers under the override and clears the legacy dirs
     try std.Io.Dir.cwd().createDirPath(dbg_io, s.p("/cache/Tap"));
     try putFile(s.p("/cache/Cask/flux-2.0.dmg"), "dmg");
     try putFile(s.p("/cache/Cask/flux-2.0.fonts"), "spec");
-    try putFile(s.p("/cache/Tap/" ++ "ab" ** 32 ++ ".tar.gz"), "tgz");
+    try putFile(s.p("/cache/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))) ++ ".tar.gz"), "tgz");
 
     // The override does not exist yet: the first mutating command creates it.
     adoptLegacy(dbg_io, s.base, s.p("/alt"));
@@ -132,7 +131,7 @@ test "adoptLegacy moves both tiers under the override and clears the legacy dirs
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("dmg", try readSmall(s.p("/alt/Cask/flux-2.0.dmg"), &buf));
     try std.testing.expectEqualStrings("spec", try readSmall(s.p("/alt/Cask/flux-2.0.fonts"), &buf));
-    try std.testing.expectEqualStrings("tgz", try readSmall(s.p("/alt/Tap/" ++ "ab" ** 32 ++ ".tar.gz"), &buf));
+    try std.testing.expectEqualStrings("tgz", try readSmall(s.p("/alt/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("ab".*))) ++ ".tar.gz"), &buf));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(dbg_io, s.p("/cache/Cask"), .{}));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(dbg_io, s.p("/cache/Tap"), .{}));
 }
@@ -173,11 +172,11 @@ test "adoptLegacy leaves a legacy subdirectory alone and still empties the files
     var s = try Scratch.init("artefact_adopt_subdir");
     defer s.deinit();
     try std.Io.Dir.cwd().createDirPath(dbg_io, s.p("/cache/Tap/nested"));
-    try putFile(s.p("/cache/Tap/" ++ "cd" ** 32 ++ ".zip"), "zip");
+    try putFile(s.p("/cache/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("cd".*))) ++ ".zip"), "zip");
 
     adoptLegacy(dbg_io, s.base, s.p("/alt"));
 
-    try std.Io.Dir.accessAbsolute(dbg_io, s.p("/alt/Tap/" ++ "cd" ** 32 ++ ".zip"), .{});
+    try std.Io.Dir.accessAbsolute(dbg_io, s.p("/alt/Tap/" ++ std.mem.asBytes(&@as([32][2]u8, @splat("cd".*))) ++ ".zip"), .{});
     try std.Io.Dir.accessAbsolute(dbg_io, s.p("/cache/Tap/nested"), .{});
 }
 
@@ -191,7 +190,7 @@ test "adoptLegacy with no legacy tree touches nothing" {
 test "adoptLegacy moves a Tap archive onto a destination path past 512 bytes" {
     var s = try Scratch.init("artefact_adopt_long");
     defer s.deinit();
-    const seg = "c" ** 200;
+    const seg = &@as([200]u8, @splat('c'));
     const cache_dir = s.p("/" ++ seg ++ "/" ++ seg ++ "/" ++ seg);
     try std.testing.expect(cache_dir.len + "/Tap".len > 512);
     try std.Io.Dir.cwd().createDirPath(dbg_io, s.p("/cache/Tap"));
@@ -200,7 +199,7 @@ test "adoptLegacy moves a Tap archive onto a destination path past 512 bytes" {
     adoptLegacy(dbg_io, s.base, cache_dir);
 
     var dest_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dest = try std.fmt.bufPrint(&dest_buf, "{s}/Tap/x", .{cache_dir});
+    const dest = try std.mem.print(&dest_buf, "{s}/Tap/x", .{cache_dir});
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("tgz", try readSmall(dest, &buf));
 }

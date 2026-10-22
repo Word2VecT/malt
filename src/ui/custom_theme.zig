@@ -154,7 +154,7 @@ fn truecolor(r: u8, g: u8, b: u8) Sgr {
 /// widest output is `max_sgr_len` bytes, so `bufPrint` can never overflow.
 fn sgr(comptime fmt: []const u8, args: anytype) Sgr {
     var out: Sgr = .{ .buf = undefined, .len = 0 };
-    const s = std.fmt.bufPrint(&out.buf, fmt, args) catch unreachable; // u8 args ≤ max_sgr_len
+    const s = std.mem.print(&out.buf, fmt, args) catch unreachable; // u8 args ≤ max_sgr_len
     out.len = s.len;
     return out;
 }
@@ -318,7 +318,7 @@ test "rgb array rejects rgba and every non-3-integer shape" {
 
 test "an over-long hex string is rejected on length alone (no scan, no DoS)" {
     // 4096 'f's after '#': neither arity, so it fails before any digit is read.
-    try expectRejects("\"#" ++ ("f" ** 4096) ++ "\"");
+    try expectRejects("\"#" ++ (&@as([4096]u8, @splat('f'))) ++ "\"");
 }
 
 test "rgb array rejects an out-of-i64-range element (number_string)" {

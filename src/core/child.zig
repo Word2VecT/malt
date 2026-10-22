@@ -46,7 +46,7 @@ pub fn termToCode(term: std.process.Child.Term) u8 {
     return switch (term) {
         .exited => |c| c,
         // WTERMSIG masks the signum to 7 bits, so 128+signum always fits u8.
-        .signal, .stopped => |s| 128 +| @as(u8, @intCast(@intFromEnum(s))),
+        .signal, .stopped => |s| 128 +| @as(u8, @intCast(@backingInt(s))),
         .unknown => 255,
     };
 }
@@ -250,7 +250,7 @@ test "output that fits the cap is not flagged truncated" {
 test "output past the cap is flagged, not quietly shortened" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
-    const payload = "0123456789" ** 32;
+    const payload = std.mem.asBytes(&@as([32][10]u8, @splat("0123456789".*)));
     var report = try runCapped(threaded.io(), std.testing.allocator, &.{ "/bin/echo", payload }, 16);
     defer report.deinit(std.testing.allocator);
     try std.testing.expect(report.truncated);
@@ -283,20 +283,20 @@ test "runOrFailInDir anchors relative writes to the open directory" {
     defer threaded.deinit();
     const io = threaded.io();
     const a = std.testing.allocator;
-    const base = try std.fmt.allocPrintSentinel(a, "/tmp/malt_child_cwd_{d}", .{std.c.getpid()}, 0);
+    const base = try a.printSentinel("/tmp/malt_child_cwd_{d}", .{std.c.getpid()}, 0);
     defer a.free(base);
     std.Io.Dir.cwd().deleteTree(io, base) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
-    const work = try std.fmt.allocPrint(a, "{s}/work", .{base});
+    const work = try a.print("{s}/work", .{base});
     defer a.free(work);
-    const held = try std.fmt.allocPrint(a, "{s}/held", .{base});
+    const held = try a.print("{s}/held", .{base});
     defer a.free(held);
-    const outside = try std.fmt.allocPrint(a, "{s}/outside", .{base});
+    const outside = try a.print("{s}/outside", .{base});
     defer a.free(outside);
-    const held_marker = try std.fmt.allocPrint(a, "{s}/marker", .{held});
+    const held_marker = try a.print("{s}/marker", .{held});
     defer a.free(held_marker);
-    const outside_marker = try std.fmt.allocPrint(a, "{s}/marker", .{outside});
+    const outside_marker = try a.print("{s}/marker", .{outside});
     defer a.free(outside_marker);
 
     try std.Io.Dir.cwd().createDirPath(io, work);
@@ -347,7 +347,7 @@ test "termToCode forwards the real exit code and maps signals to 128+signum" {
     try std.testing.expectEqual(@as(u8, 130), termToCode(.{ .signal = .INT }));
     try std.testing.expectEqual(@as(u8, 137), termToCode(.{ .signal = .KILL }));
     // stopped follows the same formula; SIGSTOP differs by platform, so derive.
-    try std.testing.expectEqual(@as(u8, 128 + @intFromEnum(std.posix.SIG.STOP)), termToCode(.{ .stopped = .STOP }));
+    try std.testing.expectEqual(@as(u8, 128 + @backingInt(std.posix.SIG.STOP)), termToCode(.{ .stopped = .STOP }));
     // unknown has no signum — keeps the opaque sentinel.
     try std.testing.expectEqual(@as(u8, 255), termToCode(.{ .unknown = 0 }));
 }
