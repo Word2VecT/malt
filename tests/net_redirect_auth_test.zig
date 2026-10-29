@@ -875,7 +875,7 @@ test "getResolved follows a four-redirect installer chain" {
 // The window this closes: classifying a cask - possibly as `.pkg`, which
 // raises the sudo installer prompt - from a chain the download then rejects.
 // One hop past the download's budget must never resolve.
-fn refusesOverlongChain(method: std.http.Method) !void {
+fn refusesOverlongChain(method: std.http.Method, redirects: usize) !void {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -891,12 +891,12 @@ fn refusesOverlongChain(method: std.http.Method) !void {
         .listener = &l1,
         .redirect_to = loc,
         .status = .found,
-        .redirects_left = client.HttpClient.max_redirects + 1,
+        .redirects_left = redirects,
     };
     // Serves one request more than the walk may spend, so a loop that follows
     // the extra hop reaches a terminal 200 and resolves instead of hanging;
     // refusing after that keeps a retried cap trip from stalling either.
-    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, client.HttpClient.max_redirects + 2 });
+    const t1 = try std.Thread.spawn(.{}, serveCountThenRefuse, .{ &hop1, redirects + 1 });
 
     var url_buf: [64]u8 = undefined;
     const url = try std.mem.print(&url_buf, "http://127.0.0.1:{d}/start", .{p1});
@@ -919,11 +919,29 @@ fn refusesOverlongChain(method: std.http.Method) !void {
 }
 
 test "headResolved refuses a chain one hop longer than the download can follow" {
-    try refusesOverlongChain(.HEAD);
+    try refusesOverlongChain(.HEAD, client.HttpClient.max_redirects + 1);
 }
 
 test "getResolved refuses a chain one hop longer than the download can follow" {
-    try refusesOverlongChain(.GET);
+    try refusesOverlongChain(.GET, client.HttpClient.max_redirects + 1);
+}
+
+// The tests above move with `max_redirects`; fixed lengths pin the budget itself,
+// so a lower cap breaks longer installer chains and a higher one loosens the bound.
+test "headResolved follows a ten-redirect chain" {
+    try resolvesFullChain(.HEAD, 10);
+}
+
+test "getResolved follows a ten-redirect chain" {
+    try resolvesFullChain(.GET, 10);
+}
+
+test "headResolved refuses an eleven-redirect chain" {
+    try refusesOverlongChain(.HEAD, 11);
+}
+
+test "getResolved refuses an eleven-redirect chain" {
+    try refusesOverlongChain(.GET, 11);
 }
 
 fn downloadsFullChain(redirects: usize) !void {
